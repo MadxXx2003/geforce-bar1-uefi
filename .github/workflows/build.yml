@@ -1,0 +1,65 @@
+name: Build UEFI PCI scanner
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - '*.inf'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Install EDK II build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential uuid-dev nasm acpica-tools \
+            python3 python3-pip python3-venv git
+
+      - name: Checkout EDK II
+        uses: actions/checkout@v4
+        with:
+          repository: tianocore/edk2
+          ref: master
+          path: edk2
+          submodules: recursive
+
+      - name: Stage application in EDK II workspace
+        run: |
+          mkdir -p edk2/GeForceBar1Uefi/src
+          cp GeForceBar1Uefi.inf edk2/GeForceBar1Uefi/
+          cp src/GeForceBar1Uefi.c edk2/GeForceBar1Uefi/src/
+
+      - name: Build EDK II BaseTools and application
+        working-directory: edk2
+        run: |
+          make -C BaseTools
+          source edksetup.sh
+          build -a X64 -t GCC5 -b RELEASE \
+            -p MdeModulePkg/MdeModulePkg.dsc \
+            -m GeForceBar1Uefi/GeForceBar1Uefi.inf
+
+      - name: Collect EFI application
+        run: |
+          mkdir -p dist
+          EFI_FILE="$(find edk2/Build -type f -name GeForceBar1Uefi.efi -print -quit)"
+          test -n "$EFI_FILE"
+          cp "$EFI_FILE" dist/GeForceBar1Uefi.efi
+          sha256sum dist/GeForceBar1Uefi.efi | tee dist/SHA256SUMS
+          file dist/GeForceBar1Uefi.efi
+
+      - name: Upload EFI scanner
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeForceBar1Uefi-readonly-x64
+          path: dist/
+          if-no-files-found: error
