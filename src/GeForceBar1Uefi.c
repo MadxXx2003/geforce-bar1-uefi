@@ -48,7 +48,6 @@
 #define NVIDIA_REBAR_OFFSET       0xBB0
 #define NVIDIA_BAR1_CAP_OFFSET    0xBBC
 
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
 STATIC
 EFI_STATUS
