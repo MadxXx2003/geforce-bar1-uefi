@@ -44,6 +44,7 @@ jobs:
         run: |
           make -C BaseTools
           source edksetup.sh
+          export GCC5_X64_PREFIX=x86_64-linux-gnu-
           build -a X64 -t GCC5 -b RELEASE \
             -p MdeModulePkg/MdeModulePkg.dsc \
             -m GeForceBar1Uefi/GeForceBar1Uefi.inf
