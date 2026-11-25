@@ -52,6 +52,15 @@ jobs:
           cp GeForceBar1Uefi.inf edk2/GeForceBar1Uefi/
           cp src/GeForceBar1Uefi.c edk2/GeForceBar1Uefi/src/
 
+      - name: Register application in platform DSC
+        working-directory: edk2
+        run: |
+          cat >> MdeModulePkg/MdeModulePkg.dsc <<'EOF'
+
+          [Components.X64]
+            GeForceBar1Uefi/GeForceBar1Uefi.inf
+          EOF
+
       - name: Build EDK II BaseTools and application
         working-directory: edk2
         run: |
