@@ -20,3 +20,6 @@
   UefiBootServicesTableLib
   UefiLib
   MemoryAllocationLib
+
+[Protocols]
+  gEfiPciIoProtocolGuid
