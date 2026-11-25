@@ -57,6 +57,15 @@ jobs:
           cp "$EFI_FILE" dist/GeForceBar1Uefi.efi
           sha256sum dist/GeForceBar1Uefi.efi | tee dist/SHA256SUMS
           file dist/GeForceBar1Uefi.efi
+          echo "=== GCC toolchain definitions ==="
+          grep -nE 'GCC[0-9]+_.*(FAMILY|PATH|FLAGS)' Conf/tools_def.txt | head -40
+          
+          echo "=== Compiler versions ==="
+          gcc --version
+          x86_64-linux-gnu-gcc --version
+          
+          echo "=== EDK II toolchain configuration ==="
+          grep -n 'GCC5' Conf/tools_def.txt | head -20
 
       - name: Upload EFI scanner
         uses: actions/upload-artifact@v4
