@@ -300,6 +300,7 @@ UefiMain (
     } else {
       Print(L"    Intel root-port candidate\n");
       PrintBars(PciIo);
+      PrintBridgeWindows(PciIo);
     }
 
     Print(L"\n");
