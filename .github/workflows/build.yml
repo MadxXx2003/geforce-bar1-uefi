@@ -1,3 +1,4 @@
+
 name: Build UEFI PCI scanner
 
 on:
@@ -15,6 +16,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+
     steps:
       - name: Checkout project
         uses: actions/checkout@v4
@@ -22,8 +24,19 @@ jobs:
       - name: Install EDK II build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential uuid-dev nasm acpica-tools \
+          sudo apt-get install -y \
+            build-essential gcc g++ binutils make \
+            uuid-dev nasm acpica-tools \
             python3 python3-pip python3-venv git
+
+      - name: Verify compiler and tools
+        run: |
+          gcc --version
+          g++ --version
+          make --version
+          nasm -v
+          iasl -v
+          x86_64-linux-gnu-gcc --version
 
       - name: Checkout EDK II
         uses: actions/checkout@v4
@@ -44,8 +57,13 @@ jobs:
         run: |
           make -C BaseTools
           source edksetup.sh
-          export GCC5_X64_PREFIX=x86_64-linux-gnu-
-          build -a X64 -t GCC5 -b RELEASE \
+
+          echo "=== Available GCC toolchain definitions ==="
+          grep -nE 'GCC(_X64|_IA32)?_' Conf/tools_def.txt | head -30
+
+          export GCC_X64_PREFIX=x86_64-linux-gnu-
+
+          build -a X64 -t GCC -b RELEASE \
             -p MdeModulePkg/MdeModulePkg.dsc \
             -m GeForceBar1Uefi/GeForceBar1Uefi.inf
 
@@ -57,15 +75,6 @@ jobs:
           cp "$EFI_FILE" dist/GeForceBar1Uefi.efi
           sha256sum dist/GeForceBar1Uefi.efi | tee dist/SHA256SUMS
           file dist/GeForceBar1Uefi.efi
-          echo "=== GCC toolchain definitions ==="
-          grep -nE 'GCC[0-9]+_.*(FAMILY|PATH|FLAGS)' Conf/tools_def.txt | head -40
-          
-          echo "=== Compiler versions ==="
-          gcc --version
-          x86_64-linux-gnu-gcc --version
-          
-          echo "=== EDK II toolchain configuration ==="
-          grep -n 'GCC5' Conf/tools_def.txt | head -20
 
       - name: Upload EFI scanner
         uses: actions/upload-artifact@v4
