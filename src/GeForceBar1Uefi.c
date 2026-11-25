@@ -16,6 +16,10 @@
 #define PCI_CLASS_USB     0x0C
 #define PCI_EXT_CAP_START 0x100
 #define PCI_EXT_CAP_END   0x1000
+#define PCI_EXT_CAP_ID_REBAR  0x0015
+#define REBAR_BAR1_INDEX     1
+#define REBAR_SIZE_SHIFT     8
+#define REBAR_SIZE_MASK      0x1F
 
 STATIC
 EFI_STATUS
@@ -124,6 +128,109 @@ PrintBars (
             Bar, Low, (Low >> 3) & 1);
     }
   }
+}
+
+STATIC
+VOID
+PrintRebar (
+  IN EFI_PCI_IO_PROTOCOL *PciIo
+  )
+{
+  UINT32 Header;
+  UINT32 FirstControl;
+  UINT32 Capability;
+  UINT32 Control;
+  UINT32 Count;
+  UINT32 Index;
+  UINT32 BarIndex;
+  UINT32 SizeIndex;
+  UINT32 Offset;
+  UINT32 EntryCount;
+  UINT64 SizeMiB;
+  BOOLEAN Found;
+  EFI_STATUS Status;
+
+  Print(L"    Resizable BAR analysis:\n");
+
+  Status = ReadConfig32(PciIo, 0xBB0, &Header);
+  if (EFI_ERROR(Status) ||
+      (Header & 0xFFFF) != PCI_EXT_CAP_ID_REBAR) {
+    Print(L"      Expected XVE ReBAR capability not found at 0xBB0\n");
+    return;
+  }
+
+  Print(L"      Capability header: %08x\n", Header);
+
+  Status = ReadConfig32(PciIo, 0xBB8, &FirstControl);
+  if (EFI_ERROR(Status)) {
+    Print(L"      Cannot read ReBAR entry count\n");
+    return;
+  }
+
+  EntryCount = (FirstControl >> 5) & 7;
+
+  Print(L"      Number of ReBAR entries: %u\n", EntryCount);
+
+  Found = FALSE;
+
+  for (Index = 0; Index < EntryCount; Index++) {
+    Offset = 0xBB4 + (Index * 8);
+
+    Status = ReadConfig32(PciIo, Offset, &Capability);
+    if (EFI_ERROR(Status)) {
+      Print(L"      Entry %u capability read failed\n", Index);
+      continue;
+    }
+
+    Status = ReadConfig32(PciIo, Offset + 4, &Control);
+    if (EFI_ERROR(Status)) {
+      Print(L"      Entry %u control read failed\n", Index);
+      continue;
+    }
+
+    BarIndex = Control & 7;
+
+    Print(
+      L"      Entry %u: capability=%03x control=%03x BAR=%u\n",
+      Index,
+      Offset,
+      Offset + 4,
+      BarIndex
+      );
+
+    if (BarIndex != REBAR_BAR1_INDEX) {
+      continue;
+    }
+
+    Found = TRUE;
+    SizeIndex = (Control >> REBAR_SIZE_SHIFT) & REBAR_SIZE_MASK;
+
+    Print(L"      BAR1 supported sizes:\n");
+
+    for (Count = 4; Count < 32; Count++) {
+      if ((Capability & ((UINT32)1 << Count)) != 0) {
+        SizeMiB = (UINT64)1 << (Count - 4);
+
+        Print(
+          L"        %Lu MiB%s\n",
+          SizeMiB,
+          (Count == SizeIndex + 4) ? L" (selected)" : L""
+          );
+      }
+    }
+
+    SizeMiB = (UINT64)1 << SizeIndex;
+
+    Print(L"      Current ReBAR size: %Lu MiB\n", SizeMiB);
+    Print(L"      Raw capability: %08x\n", Capability);
+    Print(L"      Raw control:    %08x\n", Control);
+  }
+
+  if (!Found) {
+    Print(L"      No BAR1 entry found\n");
+  }
+
+  Print(L"      READ ONLY: no ReBAR registers modified\n");
 }
 
 STATIC
@@ -292,6 +399,7 @@ UefiMain (
     if (IsNvidiaDisplay) {
       Print(L"    NVIDIA display controller candidate\n");
       PrintBars(PciIo);
+      PrintRebar(PciIo);
       PrintExtendedCapabilities(PciIo);
       PrintNvidiaVsec(PciIo);
     } else if (Vendor == NVIDIA_VENDOR_ID) {
