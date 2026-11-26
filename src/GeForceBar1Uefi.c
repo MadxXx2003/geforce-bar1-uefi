@@ -1032,7 +1032,7 @@ UefiMain (
     if (IsNvidiaDisplay) {
       Print(L"    NVIDIA display controller candidate\n");
     
-      PrintBars(PciIo);
+      PrintBars(PciIo, BarCount);
     
       /*
        * Raw data first: independent evidence for all decoded results.
@@ -1044,7 +1044,7 @@ UefiMain (
        */
       PrintExtendedCapabilities(PciIo);
       PrintRebar(PciIo);
-      PrintNvidiaVsec(PciIo);
+      PrintNvidiaVsec(PciIo, HeaderType);
 
     } else if (Vendor == NVIDIA_VENDOR_ID) {
       Print(L"    NVIDIA companion/other function\n");
