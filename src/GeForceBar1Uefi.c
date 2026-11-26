@@ -5,17 +5,18 @@
   This utility deliberately performs NO PCI configuration writes.
   It does not remove/hide functions, resize BARs, or chainload.
 
-  Stage 1:
-    - PCI Type 0 / Type 1 header-aware BAR enumeration
-    - PCI bridge-window decoding
-    - PCIe extended-capability traversal
-    - Resizable BAR entry enumeration
-    - NVIDIA VSEC structural validation
-    - Read-only resource-layout diagnostics
+  Read-only inventory:
+    - PCI Type 0 / Type 1 BAR enumeration
+    - GetBarAttributes resource descriptors for NVIDIA BARs
+    - EFI_PCI_IO_PROTOCOL open-agent ownership inventory
+    - Bus-number-based parent-bridge association
+    - PCI bridge-window decoding and 8-GiB comparison
+    - PCIe extended-capability traversal and ReBAR/VSEC inspection
 **/
 
 #include <Uefi.h>
 #include <Protocol/PciIo.h>
+#include <IndustryStandard/Acpi.h>
 #include <Library/UefiLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/MemoryAllocationLib.h>
@@ -31,7 +32,6 @@
 
 #define PCI_EXT_CAP_START         0x100
 #define PCI_EXT_CAP_END           0x1000
-#define PCI_EXT_CAP_MAX_COUNT     256
 
 #define PCI_EXT_CAP_DWORD_COUNT \
   ((PCI_EXT_CAP_END - PCI_EXT_CAP_START) / 4)
@@ -57,6 +57,8 @@
 #define NVIDIA_REBAR_OFFSET       0xBB0
 #define NVIDIA_BAR1_CAP_OFFSET    0xBBC
 
+#define BAR1_TARGET_BYTES         0x0000000200000000ULL /* 8 GiB */
+
 
 STATIC
 EFI_STATUS
@@ -81,15 +83,377 @@ ReadConfig32 (
                     );
 }
 
+/* Snapshot record used only for read-only PCI topology correlation. */
+typedef struct {
+  EFI_HANDLE Handle;
+  UINTN Segment;
+  UINTN Bus;
+  UINTN Device;
+  UINTN Function;
+  UINT16 Vendor;
+  UINT16 DeviceId;
+  UINT8 BaseClass;
+  UINT8 SubClass;
+  UINT8 HeaderType;
+  UINT8 SecondaryBus;
+  UINT8 SubordinateBus;
+  BOOLEAN Valid;
+} PCI_DEVICE_RECORD;
+
 /**
-  Find a PCIe extended capability by ID.
-
-  The capability chain is followed using the next-pointer field.
-  Invalid, unaligned, backward, out-of-range and cyclic-looking
-  pointers terminate traversal.
-
-  This function only reads configuration space.
+  Build a read-only snapshot of PCI handles for topology correlation.
 **/
+STATIC
+VOID
+CollectPciRecords (
+  IN EFI_HANDLE *Handles,
+  IN UINTN HandleCount,
+  IN EFI_HANDLE ImageHandle,
+  OUT PCI_DEVICE_RECORD *Records
+  )
+{
+  UINTN Index;
+  EFI_PCI_IO_PROTOCOL *PciIo;
+  EFI_STATUS Status;
+  UINT32 IdReg;
+  UINT32 ClassReg;
+  UINT32 HeaderReg;
+  UINT32 BusReg;
+
+  for (Index = 0; Index < HandleCount; Index++) {
+    PciIo = NULL;
+    Records[Index].Handle = Handles[Index];
+
+    Status = gBS->OpenProtocol (
+                    Handles[Index],
+                    &gEfiPciIoProtocolGuid,
+                    (VOID **)&PciIo,
+                    ImageHandle,
+                    NULL,
+                    EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                    );
+    if (EFI_ERROR(Status) || PciIo == NULL) {
+      if (!EFI_ERROR(Status)) {
+        gBS->CloseProtocol(
+               Handles[Index],
+               &gEfiPciIoProtocolGuid,
+               ImageHandle,
+               NULL
+               );
+      }
+      continue;
+    }
+
+    Status = PciIo->GetLocation (
+                      PciIo,
+                      &Records[Index].Segment,
+                      &Records[Index].Bus,
+                      &Records[Index].Device,
+                      &Records[Index].Function
+                      );
+    if (EFI_ERROR(Status) ||
+        EFI_ERROR(ReadConfig32(PciIo, 0x00, &IdReg)) ||
+        EFI_ERROR(ReadConfig32(PciIo, 0x08, &ClassReg)) ||
+        EFI_ERROR(ReadConfig32(PciIo, 0x0C, &HeaderReg))) {
+      gBS->CloseProtocol(
+             Handles[Index],
+             &gEfiPciIoProtocolGuid,
+             ImageHandle,
+             NULL
+             );
+      continue;
+    }
+
+    Records[Index].Vendor = (UINT16)(IdReg & 0xFFFF);
+    Records[Index].DeviceId = (UINT16)(IdReg >> 16);
+    Records[Index].BaseClass = (UINT8)(ClassReg >> 24);
+    Records[Index].SubClass = (UINT8)(ClassReg >> 16);
+    Records[Index].HeaderType = (UINT8)((HeaderReg >> 16) & 0x7F);
+
+    if (Records[Index].HeaderType == PCI_HEADER_TYPE_BRIDGE &&
+        !EFI_ERROR(ReadConfig32(PciIo, 0x18, &BusReg))) {
+      Records[Index].SecondaryBus = (UINT8)(BusReg >> 8);
+      Records[Index].SubordinateBus = (UINT8)(BusReg >> 16);
+    }
+
+    if (Records[Index].Vendor != 0xFFFF && Records[Index].Vendor != 0) {
+      Records[Index].Valid = TRUE;
+    }
+
+    gBS->CloseProtocol(
+           Handles[Index],
+           &gEfiPciIoProtocolGuid,
+           ImageHandle,
+           NULL
+           );
+  }
+}
+
+/**
+  Find the PCI-to-PCI bridge whose secondary bus is the endpoint's bus.
+  This is a bus-number topology association, not a resource-allocation claim.
+**/
+STATIC
+PCI_DEVICE_RECORD *
+FindParentBridge (
+  IN PCI_DEVICE_RECORD *Records,
+  IN UINTN RecordCount,
+  IN UINTN Segment,
+  IN UINTN ChildBus
+  )
+{
+  UINTN Index;
+
+  for (Index = 0; Index < RecordCount; Index++) {
+    if (Records[Index].Valid &&
+        Records[Index].Segment == Segment &&
+        Records[Index].BaseClass == PCI_CLASS_BRIDGE &&
+        Records[Index].SubClass == 0x04 &&
+        Records[Index].HeaderType == PCI_HEADER_TYPE_BRIDGE &&
+        Records[Index].SecondaryBus == ChildBus) {
+      return &Records[Index];
+    }
+  }
+
+  return NULL;
+}
+
+STATIC
+VOID
+PrintParentBridge (
+  IN PCI_DEVICE_RECORD *Records,
+  IN UINTN RecordCount,
+  IN UINTN Segment,
+  IN UINTN ChildBus
+  )
+{
+  PCI_DEVICE_RECORD *Parent;
+
+  if (ChildBus == 0) {
+    Print(L"    Parent bridge: root complex (no upstream PCI bridge bus)\n");
+    return;
+  }
+
+  Parent = FindParentBridge(Records, RecordCount, Segment, ChildBus);
+  if (Parent == NULL) {
+    Print(L"    Parent bridge: not identified from enumerated bridge bus numbers\n");
+    return;
+  }
+
+  Print(
+    L"    Parent bridge: %04x:%02x:%02x.%x  %04x:%04x  secondary=%u subordinate=%u\n",
+    Parent->Segment,
+    Parent->Bus,
+    Parent->Device,
+    Parent->Function,
+    Parent->Vendor,
+    Parent->DeviceId,
+    Parent->SecondaryBus,
+    Parent->SubordinateBus
+    );
+}
+
+/**
+  Query the PCI bus driver's current resource descriptor for every BAR.
+  GetBarAttributes is a query; this routine never calls SetBarAttributes.
+**/
+STATIC
+VOID
+PrintBarResources (
+  IN EFI_PCI_IO_PROTOCOL *PciIo,
+  IN UINTN BarCount
+  )
+{
+  UINTN Bar;
+  UINTN DescriptorIndex;
+  UINT64 Supports;
+  VOID *Resources;
+  EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR *Descriptor;
+  EFI_STATUS Status;
+  CONST CHAR16 *TypeName;
+  BOOLEAN FoundDescriptor;
+
+  Print(L"    Firmware PCI BAR resource descriptors (GetBarAttributes, read-only):\n");
+
+  for (Bar = 0; Bar < BarCount && Bar < 6; Bar++) {
+    Supports = 0;
+    Resources = NULL;
+
+    Status = PciIo->GetBarAttributes(
+                      PciIo,
+                      (UINT8)Bar,
+                      &Supports,
+                      &Resources
+                      );
+
+    if (Status == EFI_UNSUPPORTED) {
+      Print(L"      BAR%u: unsupported/unimplemented\n", Bar);
+      continue;
+    }
+
+    if (EFI_ERROR(Status)) {
+      Print(L"      BAR%u: GetBarAttributes failed: %r\n", Bar, Status);
+      continue;
+    }
+
+    Print(L"      BAR%u: supported attributes=%016Lx\n", Bar, Supports);
+
+    if (Resources == NULL) {
+      Print(L"        no resource descriptor returned\n");
+      continue;
+    }
+
+    Descriptor = (EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR *)Resources;
+    FoundDescriptor = FALSE;
+
+    /* The UEFI PCI I/O contract returns an ACPI descriptor list + END tag. */
+    for (DescriptorIndex = 0; DescriptorIndex < 16; DescriptorIndex++) {
+      if (Descriptor->Desc == ACPI_END_TAG_DESCRIPTOR) {
+        break;
+      }
+
+      if (Descriptor->Desc != ACPI_ADDRESS_SPACE_DESCRIPTOR) {
+        Print(L"        unexpected ACPI resource descriptor type=%02x; stopping\n",
+              Descriptor->Desc);
+        break;
+      }
+
+      FoundDescriptor = TRUE;
+      if (Descriptor->ResType == ACPI_ADDRESS_SPACE_TYPE_MEM) {
+        TypeName = L"MEM";
+      } else if (Descriptor->ResType == ACPI_ADDRESS_SPACE_TYPE_IO) {
+        TypeName = L"I/O";
+      } else {
+        TypeName = L"OTHER";
+      }
+
+      Print(
+        L"        %s granularity=%Lu specific=%02x min=%016Lx max=%016Lx translation=%016Lx length=%016Lx\n",
+        TypeName,
+        Descriptor->AddrSpaceGranularity,
+        Descriptor->SpecificFlag,
+        Descriptor->AddrRangeMin,
+        Descriptor->AddrRangeMax,
+        Descriptor->AddrTranslationOffset,
+        Descriptor->AddrLen
+        );
+
+      if (Descriptor->ResType == ACPI_ADDRESS_SPACE_TYPE_MEM &&
+          (Descriptor->SpecificFlag & 0x06) == 0x06) {
+        Print(L"          memory type: prefetchable\n");
+      } else if (Descriptor->ResType == ACPI_ADDRESS_SPACE_TYPE_MEM) {
+        Print(L"          memory type: non-prefetchable/other\n");
+      }
+
+      Descriptor++;
+    }
+
+    if (!FoundDescriptor) {
+      Print(L"        no address-space descriptor present\n");
+    }
+
+    if (DescriptorIndex == 16) {
+      Print(L"        descriptor-list display limit reached\n");
+    }
+
+    FreePool(Resources);
+  }
+}
+
+/**
+  Report agents that currently have EFI_PCI_IO_PROTOCOL open on this handle.
+  Handles are printed verbatim; this does not disconnect or claim any driver.
+**/
+STATIC
+VOID
+PrintProtocolOwners (
+  IN EFI_HANDLE ControllerHandle,
+  IN EFI_HANDLE ScannerImageHandle
+  )
+{
+  EFI_OPEN_PROTOCOL_INFORMATION_ENTRY *Entries;
+  UINTN EntryCount;
+  UINTN Index;
+  EFI_STATUS Status;
+  UINT32 Attributes;
+  BOOLEAN HasByDriver;
+
+  Entries = NULL;
+  EntryCount = 0;
+  HasByDriver = FALSE;
+
+  Print(L"    EFI_PCI_IO_PROTOCOL open/ownership inventory:\n");
+
+  Status = gBS->OpenProtocolInformation(
+                  ControllerHandle,
+                  &gEfiPciIoProtocolGuid,
+                  &Entries,
+                  &EntryCount
+                  );
+
+  if (Status == EFI_NOT_FOUND) {
+    Print(L"      no protocol-open records reported\n");
+    return;
+  }
+
+  if (EFI_ERROR(Status)) {
+    Print(L"      OpenProtocolInformation failed: %r\n", Status);
+    return;
+  }
+
+  if (EntryCount == 0) {
+    Print(L"      no agents currently recorded\n");
+  }
+
+  for (Index = 0; Index < EntryCount; Index++) {
+    Attributes = Entries[Index].Attributes;
+
+    Print(
+      L"      agent=%p controller=%p opens=%u attrs=%08x",
+      Entries[Index].AgentHandle,
+      Entries[Index].ControllerHandle,
+      Entries[Index].OpenCount,
+      Attributes
+      );
+
+    if ((Attributes & EFI_OPEN_PROTOCOL_BY_DRIVER) != 0) {
+      HasByDriver = TRUE;
+      Print(L" BY_DRIVER");
+    }
+    if ((Attributes & EFI_OPEN_PROTOCOL_BY_CHILD_CONTROLLER) != 0) {
+      Print(L" BY_CHILD_CONTROLLER");
+    }
+    if ((Attributes & EFI_OPEN_PROTOCOL_EXCLUSIVE) != 0) {
+      Print(L" EXCLUSIVE");
+    }
+    if ((Attributes & EFI_OPEN_PROTOCOL_GET_PROTOCOL) != 0) {
+      Print(L" GET_PROTOCOL");
+    }
+    if ((Attributes & EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL) != 0) {
+      Print(L" BY_HANDLE_PROTOCOL");
+    }
+    if ((Attributes & EFI_OPEN_PROTOCOL_TEST_PROTOCOL) != 0) {
+      Print(L" TEST_PROTOCOL");
+    }
+
+    if (Entries[Index].AgentHandle == ScannerImageHandle) {
+      Print(L" SCANNER (temporary GET_PROTOCOL reference)");
+    }
+
+    Print(L"\n");
+  }
+
+  if (HasByDriver) {
+    Print(L"      Direct BY_DRIVER ownership: present (see agent handle(s) above)\n");
+  } else {
+    Print(L"      Direct BY_DRIVER ownership: none reported on this PciIo handle\n");
+  }
+
+  if (Entries != NULL) {
+    FreePool(Entries);
+  }
+}
+
 STATIC
 VOID
 PrintRawDword (
@@ -185,6 +549,12 @@ PrintRawConfigDump (
   Print(L"      (read-only; no configuration writes)\n");
 }
 
+/**
+  Find a PCIe extended capability by ID.
+
+  Backward next-pointers are permitted. A visited map detects cycles, and
+  every access is range- and alignment-checked. This function is read-only.
+**/
 STATIC
 EFI_STATUS
 FindExtendedCapability (
@@ -206,7 +576,6 @@ FindExtendedCapability (
   }
 
   *CapabilityOffset = 0;
-
   for (Slot = 0; Slot < PCI_EXT_CAP_DWORD_COUNT; Slot++) {
     Visited[Slot] = 0;
   }
@@ -214,7 +583,6 @@ FindExtendedCapability (
   Offset = PCI_EXT_CAP_START;
 
   for (Count = 0; Count < PCI_EXT_CAP_DWORD_COUNT; Count++) {
-
     if (Offset < PCI_EXT_CAP_START ||
         Offset >= PCI_EXT_CAP_END ||
         (Offset & 3) != 0) {
@@ -222,15 +590,12 @@ FindExtendedCapability (
     }
 
     Slot = (Offset - PCI_EXT_CAP_START) / 4;
-
     if (Visited[Slot]) {
       return EFI_COMPROMISED_DATA;
     }
-
     Visited[Slot] = 1;
 
     Status = ReadConfig32(PciIo, Offset, &Header);
-
     if (EFI_ERROR(Status)) {
       return Status;
     }
@@ -245,15 +610,11 @@ FindExtendedCapability (
     }
 
     Next = (Header >> 20) & 0xFFF;
-
     if (Next == 0) {
       return EFI_NOT_FOUND;
     }
 
-    /*
-     * Backward pointers are permitted.
-     * The visited table detects cycles instead.
-     */
+    /* Backward links are legal; the visited table detects cycles. */
     if (Next < PCI_EXT_CAP_START ||
         Next >= PCI_EXT_CAP_END ||
         (Next & 3) != 0) {
@@ -261,7 +622,6 @@ FindExtendedCapability (
     }
 
     Slot = (Next - PCI_EXT_CAP_START) / 4;
-
     if (Visited[Slot]) {
       return EFI_COMPROMISED_DATA;
     }
@@ -611,6 +971,11 @@ PrintRebar (
     Print(L"      Current standard ReBAR size: %Lu MiB\n", SizeMiB);
     Print(L"      Raw capability: %08x\n", Capability);
     Print(L"      Raw control:    %08x\n", Control);
+    Print(
+      L"      Standard ReBAR 8-GiB support: %s (capability bit 17)\n",
+      ((Capability & (1U << 17)) != 0) ? L"ADVERTISED" : L"NOT ADVERTISED"
+      );
+    Print(L"      (NVIDIA VSEC override is a separate mechanism; not inferred here)\n");
   }
 
   if (!Found) {
@@ -654,6 +1019,7 @@ PrintBridgeWindows (
   UINT64 IoLimit64;
   UINT64 PrefBase64;
   UINT64 PrefLimit64;
+  UINT64 PrefWindowLength;
   EFI_STATUS S0, S1, S2, S3, S4, S5, S6;
 
   S0 = ReadConfig32(PciIo, 0x18, &BusNumbers);
@@ -757,6 +1123,13 @@ PrintBridgeWindows (
 
     if (PrefBase64 > PrefLimit64) {
       Print(L"        State: disabled/invalid window\n");
+    } else {
+      PrefWindowLength = PrefLimit64 - PrefBase64 + 1;
+      Print(L"        Programmed window length: %016Lx bytes\n", PrefWindowLength);
+      Print(
+        L"        8-GiB BAR1 fit in this programmed window: %s\n",
+        (PrefWindowLength >= BAR1_TARGET_BYTES) ? L"YES (size only; placement still matters)" : L"NO"
+        );
     }
   } else {
     Print(L"      PREF window: read failed\n");
@@ -944,6 +1317,7 @@ UefiMain (
   UINTN HandleCount;
   UINTN Index;
   EFI_PCI_IO_PROTOCOL *PciIo;
+  PCI_DEVICE_RECORD *Records;
 
   UINTN Segment;
   UINTN Bus;
@@ -967,12 +1341,15 @@ UefiMain (
   BOOLEAN IsRootPort;
 
   (VOID)SystemTable;
+  (VOID)ImageHandle;
 
   Handles = NULL;
+  Records = NULL;
   HandleCount = 0;
 
-  Print(L"\n=== GeForce BAR1 UEFI - READ-ONLY PCI SCAN ===\n");
-  Print(L"Firmware-side inventory only. No PCI writes or device removal.\n\n");
+  Print(L"\n=== GeForce BAR1 UEFI - READ-ONLY PCI RESOURCE SCAN ===\n");
+  Print(L"Firmware inventory only. No PCI writes, driver disconnects, or device removal.\n");
+  Print(L"BAR1 target for feasibility checks: %016Lx bytes (8 GiB).\n\n", BAR1_TARGET_BYTES);
 
   Status = gBS->LocateHandleBuffer(
                   ByProtocol,
@@ -989,6 +1366,14 @@ UefiMain (
 
   Print(L"PCI I/O handles: %u\n\n", HandleCount);
 
+  Records = AllocateZeroPool(sizeof(*Records) * HandleCount);
+  if (Records == NULL) {
+    FreePool(Handles);
+    return EFI_OUT_OF_RESOURCES;
+  }
+
+  CollectPciRecords(Handles, HandleCount, ImageHandle, Records);
+
   for (Index = 0; Index < HandleCount; Index++) {
     PciIo = NULL;
 
@@ -1002,6 +1387,14 @@ UefiMain (
                     );
 
     if (EFI_ERROR(Status) || PciIo == NULL) {
+      if (!EFI_ERROR(Status)) {
+        gBS->CloseProtocol(
+               Handles[Index],
+               &gEfiPciIoProtocolGuid,
+               ImageHandle,
+               NULL
+               );
+      }
       continue;
     }
 
@@ -1014,21 +1407,21 @@ UefiMain (
                       );
 
     if (EFI_ERROR(Status)) {
+      gBS->CloseProtocol(Handles[Index], &gEfiPciIoProtocolGuid, ImageHandle, NULL);
       continue;
     }
 
     if (EFI_ERROR(ReadConfig32(PciIo, 0x00, &IdReg)) ||
         EFI_ERROR(ReadConfig32(PciIo, 0x08, &ClassReg)) ||
         EFI_ERROR(ReadConfig32(PciIo, 0x0C, &HeaderReg))) {
+      gBS->CloseProtocol(Handles[Index], &gEfiPciIoProtocolGuid, ImageHandle, NULL);
       continue;
     }
 
     Vendor = (UINT16)(IdReg & 0xFFFF);
     DeviceId = (UINT16)(IdReg >> 16);
-
     BaseClass = (UINT8)(ClassReg >> 24);
     SubClass = (UINT8)(ClassReg >> 16);
-
     HeaderType = (UINT8)((HeaderReg >> 16) & 0x7F);
 
     BarCount = (HeaderType == PCI_HEADER_TYPE_ENDPOINT) ? 6 :
@@ -1044,6 +1437,12 @@ UefiMain (
                   Function == 0);
 
     if (Vendor != NVIDIA_VENDOR_ID && !IsRootPort) {
+      gBS->CloseProtocol(
+             Handles[Index],
+             &gEfiPciIoProtocolGuid,
+             ImageHandle,
+             NULL
+             );
       continue;
     }
 
@@ -1060,32 +1459,22 @@ UefiMain (
       HeaderType
       );
 
-    if (IsNvidiaDisplay) {
-      Print(L"    NVIDIA display controller candidate\n");
-
+    if (Vendor == NVIDIA_VENDOR_ID) {
+      PrintParentBridge(Records, HandleCount, Segment, Bus);
       PrintBars(PciIo, BarCount);
+      PrintBarResources(PciIo, BarCount);
+      PrintProtocolOwners(Handles[Index], ImageHandle);
 
-      /*
-       * Capture raw configuration space before decoding.
-       */
-      PrintRawConfigDump(PciIo);
+      if (IsNvidiaDisplay) {
+        Print(L"    NVIDIA display controller candidate\n");
 
-      /*
-       * Walk the extended capability chain.
-       */
-      PrintExtendedCapabilities(PciIo);
-
-      /*
-       * Discovers ReBAR and VSEC and invokes PrintRebar()
-       * with the correct arguments internally.
-       */
-      PrintNvidiaVsec(PciIo, HeaderType);
-
-    } else if (Vendor == NVIDIA_VENDOR_ID) {
-      Print(L"    NVIDIA companion/other function\n");
-
-      PrintBars(PciIo, BarCount);
-
+        /* Raw data first: independent evidence for all decoded results. */
+        PrintRawConfigDump(PciIo);
+        PrintExtendedCapabilities(PciIo);
+        PrintNvidiaVsec(PciIo, HeaderType);
+      } else {
+        Print(L"    NVIDIA companion/other function\n");
+      }
     } else if (IsRootPort) {
       Print(L"    Intel root-port candidate\n");
 
@@ -1094,21 +1483,30 @@ UefiMain (
       }
 
       PrintBars(PciIo, BarCount);
-
       if (HeaderType == PCI_HEADER_TYPE_BRIDGE) {
         PrintBridgeWindows(PciIo);
       }
     }
 
     Print(L"\n");
+    gBS->CloseProtocol(
+           Handles[Index],
+           &gEfiPciIoProtocolGuid,
+           ImageHandle,
+           NULL
+           );
   }
 
+  if (Records != NULL) {
+    FreePool(Records);
+  }
   if (Handles != NULL) {
     FreePool(Handles);
   }
 
   Print(L"=== END SCAN ===\n");
-  Print(L"IMPORTANT: this build is read-only; no BAR resize is attempted.\n");
+  Print(L"IMPORTANT: read-only. No BAR resize, PCI config write, or driver disconnect was attempted.\n");
+  Print(L"NOTE: GetBarAttributes reports firmware resource descriptors; it does not enumerate all free host MMIO space.\n");
 
   return EFI_SUCCESS;
 }
