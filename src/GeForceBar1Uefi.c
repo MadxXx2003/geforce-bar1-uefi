@@ -465,9 +465,7 @@ PrintBars (
 STATIC
 VOID
 PrintRebar (
-  IN EFI_PCI_IO_PROTOCOL *PciIo,
-  IN UINT32 RebarOffset,
-  OUT UINT32 *Bar1CapabilityOffset
+  IN EFI_PCI_IO_PROTOCOL *PciIo
   )
 {
   UINT32 Header;
@@ -484,28 +482,20 @@ PrintRebar (
   BOOLEAN Found;
   EFI_STATUS Status;
 
-  if (Bar1CapabilityOffset == NULL) {
-    return;
-  }
-
-  *Bar1CapabilityOffset = 0;
-
   Print(L"    Resizable BAR analysis:\n");
 
-  Status = ReadConfig32(PciIo, RebarOffset, &Header);
-
+  Status = ReadConfig32(PciIo, 0xBB0, &Header);
   if (EFI_ERROR(Status) ||
       (Header & 0xFFFF) != PCI_EXT_CAP_ID_REBAR) {
-    Print(L"      Invalid ReBAR capability at %03x\n", RebarOffset);
+    Print(L"      Expected XVE ReBAR capability not found at 0xBB0\n");
     return;
   }
 
   Print(L"      Capability header: %08x\n", Header);
 
-  Status = ReadConfig32(PciIo, RebarOffset + 8, &FirstControl);
-
+  Status = ReadConfig32(PciIo, 0xBB8, &FirstControl);
   if (EFI_ERROR(Status)) {
-    Print(L"      Cannot read ReBAR entry count: %r\n", Status);
+    Print(L"      Cannot read ReBAR entry count\n");
     return;
   }
 
@@ -513,27 +503,20 @@ PrintRebar (
 
   Print(L"      Number of ReBAR entries: %u\n", EntryCount);
 
-  if (EntryCount == 0) {
-    Print(L"      No ReBAR entries reported\n");
-    return;
-  }
-
   Found = FALSE;
 
-  for (Index = 0; Index < EntryCount; Index++) {
-    Offset = RebarOffset + 4 + (Index * 8);
+  for (Index = 0; Index < EntryCount; Index) {
+    Offset = 0xBB4  (Index * 8);
 
     Status = ReadConfig32(PciIo, Offset, &Capability);
-
     if (EFI_ERROR(Status)) {
-      Print(L"      Entry %u capability read failed: %r\n", Index, Status);
+      Print(L"      Entry %u capability read failed\n", Index);
       continue;
     }
 
-    Status = ReadConfig32(PciIo, Offset + 4, &Control);
-
+    Status = ReadConfig32(PciIo, Offset  4, &Control);
     if (EFI_ERROR(Status)) {
-      Print(L"      Entry %u control read failed: %r\n", Index, Status);
+      Print(L"      Entry %u control read failed\n", Index);
       continue;
     }
 
@@ -543,7 +526,7 @@ PrintRebar (
       L"      Entry %u: capability=%03x control=%03x BAR=%u\n",
       Index,
       Offset,
-      Offset + 4,
+      Offset  4,
       BarIndex
       );
 
@@ -551,33 +534,26 @@ PrintRebar (
       continue;
     }
 
-    if (Found) {
-      Print(L"      WARNING: duplicate BAR1 ReBAR entry\n");
-      continue;
-    }
-
     Found = TRUE;
-    *Bar1CapabilityOffset = Offset;
-
     SizeIndex = (Control >> REBAR_SIZE_SHIFT) & REBAR_SIZE_MASK;
 
-    Print(L"      BAR1 supported sizes (standard capability bitmap):\n");
+    Print(L"      BAR1 supported sizes:\n");
 
-    for (Count = 4; Count < 32; Count++) {
+    for (Count = 4; Count < 32; Count) {
       if ((Capability & ((UINT32)1 << Count)) != 0) {
         SizeMiB = (UINT64)1 << (Count - 4);
 
         Print(
           L"        %Lu MiB%s\n",
           SizeMiB,
-          (Count == SizeIndex + 4) ? L" (selected)" : L""
+          (Count == SizeIndex  4) ? L" (selected)" : L""
           );
       }
     }
 
     SizeMiB = (UINT64)1 << SizeIndex;
 
-    Print(L"      Current standard ReBAR size: %Lu MiB\n", SizeMiB);
+    Print(L"      Current ReBAR size: %Lu MiB\n", SizeMiB);
     Print(L"      Raw capability: %08x\n", Capability);
     Print(L"      Raw control:    %08x\n", Control);
   }
