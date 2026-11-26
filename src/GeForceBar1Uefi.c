@@ -197,16 +197,38 @@ FindExtendedCapability (
   UINT32 Header;
   UINT32 Next;
   UINTN Count;
+  UINTN Slot;
+  UINT8 Visited[PCI_EXT_CAP_DWORD_COUNT];
   EFI_STATUS Status;
 
-  if (CapabilityOffset == NULL) {
+  if (PciIo == NULL || CapabilityOffset == NULL) {
     return EFI_INVALID_PARAMETER;
   }
 
   *CapabilityOffset = 0;
+
+  for (Slot = 0; Slot < PCI_EXT_CAP_DWORD_COUNT; Slot++) {
+    Visited[Slot] = 0;
+  }
+
   Offset = PCI_EXT_CAP_START;
 
-  for (Count = 0; Count < PCI_EXT_CAP_MAX_COUNT; Count++) {
+  for (Count = 0; Count < PCI_EXT_CAP_DWORD_COUNT; Count++) {
+
+    if (Offset < PCI_EXT_CAP_START ||
+        Offset >= PCI_EXT_CAP_END ||
+        (Offset & 3) != 0) {
+      return EFI_COMPROMISED_DATA;
+    }
+
+    Slot = (Offset - PCI_EXT_CAP_START) / 4;
+
+    if (Visited[Slot]) {
+      return EFI_COMPROMISED_DATA;
+    }
+
+    Visited[Slot] = 1;
+
     Status = ReadConfig32(PciIo, Offset, &Header);
 
     if (EFI_ERROR(Status)) {
@@ -228,10 +250,19 @@ FindExtendedCapability (
       return EFI_NOT_FOUND;
     }
 
+    /*
+     * Backward pointers are permitted.
+     * The visited table detects cycles instead.
+     */
     if (Next < PCI_EXT_CAP_START ||
         Next >= PCI_EXT_CAP_END ||
-        Next <= Offset ||
         (Next & 3) != 0) {
+      return EFI_COMPROMISED_DATA;
+    }
+
+    Slot = (Next - PCI_EXT_CAP_START) / 4;
+
+    if (Visited[Slot]) {
       return EFI_COMPROMISED_DATA;
     }
 
@@ -1031,19 +1062,23 @@ UefiMain (
 
     if (IsNvidiaDisplay) {
       Print(L"    NVIDIA display controller candidate\n");
-    
+
       PrintBars(PciIo, BarCount);
-    
+
       /*
-       * Raw data first: independent evidence for all decoded results.
+       * Capture raw configuration space before decoding.
        */
       PrintRawConfigDump(PciIo);
-    
+
       /*
-       * Decode the structures after capturing their raw values.
+       * Walk the extended capability chain.
        */
       PrintExtendedCapabilities(PciIo);
-      PrintRebar(PciIo);
+
+      /*
+       * Discovers ReBAR and VSEC and invokes PrintRebar()
+       * with the correct arguments internally.
+       */
       PrintNvidiaVsec(PciIo, HeaderType);
 
     } else if (Vendor == NVIDIA_VENDOR_ID) {
