@@ -33,6 +33,15 @@
 #define PCI_EXT_CAP_END           0x1000
 #define PCI_EXT_CAP_MAX_COUNT     256
 
+#define PCI_EXT_CAP_DWORD_COUNT \
+  ((PCI_EXT_CAP_END - PCI_EXT_CAP_START) / 4)
+
+/*
+ * Set to 1 to dump all aligned dwords from 0x100 through 0xFFC.
+ * Leave at 0 for the compact targeted dump.
+ */
+#define DUMP_FULL_EXT_CONFIG 1
+
 #define PCI_EXT_CAP_ID_VSEC       0x000B
 #define PCI_EXT_CAP_ID_REBAR      0x0015
 
@@ -81,6 +90,101 @@ ReadConfig32 (
 
   This function only reads configuration space.
 **/
+STATIC
+VOID
+PrintRawDword (
+  IN EFI_PCI_IO_PROTOCOL *PciIo,
+  IN UINT16 Offset
+  )
+{
+  UINT32 Value;
+  EFI_STATUS Status;
+
+  Status = ReadConfig32(PciIo, Offset, &Value);
+
+  if (EFI_ERROR(Status)) {
+    Print(L"      CFG[%03x] = <read failed: %r>\n",
+          Offset, Status);
+  } else {
+    Print(L"      CFG[%03x] = %08x\n",
+          Offset, Value);
+  }
+}
+
+STATIC
+VOID
+PrintRawConfigDump (
+  IN EFI_PCI_IO_PROTOCOL *PciIo
+  )
+{
+  STATIC CONST UINT16 Offsets[] = {
+    0x100,
+    0x128,
+    0x250,
+    0x258,
+    0x420,
+    0x600,
+    0x604,
+    0x60C,
+    0x610,
+    0x900,
+    0xBB0,
+    0xBB4,
+    0xBB8,
+    0xBBC,
+    0xBC0,
+    0xBC4,
+    0xBC8
+  };
+
+  UINTN Index;
+
+  Print(L"    Targeted raw PCI configuration dump:\n");
+
+  for (Index = 0;
+       Index < sizeof(Offsets) / sizeof(Offsets[0]);
+       Index++) {
+    PrintRawDword(PciIo, Offsets[Index]);
+  }
+
+#if DUMP_FULL_EXT_CONFIG
+  {
+    UINT32 Base;
+    UINT32 Column;
+    UINT32 Value;
+    EFI_STATUS Status;
+
+    Print(L"\n    FULL extended configuration-space dump:\n");
+    Print(L"    Range: 0x100 - 0xFFC, aligned dwords\n");
+
+    for (Base = PCI_EXT_CAP_START;
+         Base < PCI_EXT_CAP_END;
+         Base += 16) {
+
+      Print(L"      %03x:", Base);
+
+      for (Column = 0; Column < 4; Column++) {
+        Status = ReadConfig32(
+                   PciIo,
+                   Base + (Column * 4),
+                   &Value
+                   );
+
+        if (EFI_ERROR(Status)) {
+          Print(L" ????????");
+        } else {
+          Print(L" %08x", Value);
+        }
+      }
+
+      Print(L"\n");
+    }
+  }
+#endif
+
+  Print(L"      (read-only; no configuration writes)\n");
+}
+
 STATIC
 EFI_STATUS
 FindExtendedCapability (
@@ -147,46 +251,122 @@ PrintExtendedCapabilities (
   UINT32 Header;
   UINT32 Next;
   UINTN Count;
+  UINTN Slot;
+  UINT8 Visited[PCI_EXT_CAP_DWORD_COUNT];
   EFI_STATUS Status;
+
+  for (Slot = 0; Slot < PCI_EXT_CAP_DWORD_COUNT; Slot++) {
+    Visited[Slot] = 0;
+}
 
   Print(L"    Extended capabilities:\n");
 
   Offset = PCI_EXT_CAP_START;
   Count = 0;
 
-  while (Offset >= PCI_EXT_CAP_START &&
-         Offset < PCI_EXT_CAP_END &&
-         Count < PCI_EXT_CAP_MAX_COUNT) {
+  while (Count < PCI_EXT_CAP_DWORD_COUNT) {
+
+    /*
+     * Validate the current offset before accessing config space.
+     */
+    if (Offset < PCI_EXT_CAP_START ||
+        Offset >= PCI_EXT_CAP_END ||
+        (Offset & 3) != 0) {
+
+      Print(
+        L"      Invalid capability offset: %03x\n",
+        Offset
+        );
+      break;
+    }
+
+    Slot = (Offset - PCI_EXT_CAP_START) / 4;
+
+    /*
+     * Detect loops without rejecting backward links.
+     */
+    if (Visited[Slot]) {
+      Print(
+        L"      Capability loop detected at %03x\n",
+        Offset
+        );
+      break;
+    }
+
+    Visited[Slot] = 1;
 
     Status = ReadConfig32(PciIo, Offset, &Header);
 
-    if (EFI_ERROR(Status) ||
-        Header == 0 ||
-        Header == 0xFFFFFFFF) {
+    if (EFI_ERROR(Status)) {
+      Print(
+        L"      @%03x: read failed: %r\n",
+        Offset,
+        Status
+        );
+      break;
+    }
+
+    if (Header == 0 || Header == 0xFFFFFFFF) {
+      Print(
+        L"      @%03x: empty/unavailable header %08x\n",
+        Offset,
+        Header
+        );
       break;
     }
 
     Next = (Header >> 20) & 0xFFF;
 
     Print(
-      L"      @%03x: ID=%04x version=%x next=%03x\n",
+      L"      @%03x: ID=%04x version=%x next=%03x",
       Offset,
       Header & 0xFFFF,
       (Header >> 16) & 0xF,
       Next
       );
 
+    if (Next != 0 && Next < Offset) {
+      Print(L" (backward link)");
+    }
+
+    Print(L"\n");
+
     Count++;
 
+    /*
+     * A zero next pointer terminates the linked list normally.
+     */
     if (Next == 0) {
       break;
     }
 
+    /*
+     * Do not reject Next < Offset.
+     *
+     * This GPU legitimately reports:
+     *     0x258 -> 0x128
+     */
     if (Next < PCI_EXT_CAP_START ||
         Next >= PCI_EXT_CAP_END ||
-        Next <= Offset ||
         (Next & 3) != 0) {
-      Print(L"      Invalid extended-capability next pointer\n");
+
+      Print(
+        L"      Invalid next pointer: %03x\n",
+        Next
+        );
+      break;
+    }
+
+    /*
+     * Check the destination before following it.
+     */
+    Slot = (Next - PCI_EXT_CAP_START) / 4;
+
+    if (Visited[Slot]) {
+      Print(
+        L"      Next pointer %03x would create a loop\n",
+        Next
+        );
       break;
     }
 
@@ -194,18 +374,16 @@ PrintExtendedCapabilities (
   }
 
   if (Count == 0) {
-    Print(L"      unavailable or no extended capabilities exposed\n");
+    Print(
+      L"      unavailable or no extended capabilities exposed\n"
+      );
+  }
+
+  if (Count >= PCI_EXT_CAP_DWORD_COUNT) {
+    Print(L"      Capability traversal limit reached\n");
   }
 }
 
-/**
-  Print BAR registers according to the PCI header type.
-
-  Type 0 endpoint: six BAR slots.
-  Type 1 bridge:   two BAR slots.
-
-  The values are raw BAR register contents, not decoded sizes.
-**/
 STATIC
 VOID
 PrintBars (
@@ -853,10 +1031,20 @@ UefiMain (
 
     if (IsNvidiaDisplay) {
       Print(L"    NVIDIA display controller candidate\n");
-
-      PrintBars(PciIo, BarCount);
+    
+      PrintBars(PciIo);
+    
+      /*
+       * Raw data first: independent evidence for all decoded results.
+       */
+      PrintRawConfigDump(PciIo);
+    
+      /*
+       * Decode the structures after capturing their raw values.
+       */
       PrintExtendedCapabilities(PciIo);
-      PrintNvidiaVsec(PciIo, HeaderType);
+      PrintRebar(PciIo);
+      PrintNvidiaVsec(PciIo);
 
     } else if (Vendor == NVIDIA_VENDOR_ID) {
       Print(L"    NVIDIA companion/other function\n");
