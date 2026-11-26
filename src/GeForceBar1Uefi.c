@@ -16,6 +16,8 @@
 
 #include <Uefi.h>
 #include <Protocol/PciIo.h>
+#include <Protocol/PciRootBridgeIo.h>
+#include <Protocol/PciHostBridgeResourceAllocation.h>
 #include <IndustryStandard/Acpi.h>
 #include <Library/UefiLib.h>
 #include <Library/UefiBootServicesTableLib.h>
@@ -40,7 +42,7 @@
  * Set to 1 to dump all aligned dwords from 0x100 through 0xFFC.
  * Leave at 0 for the compact targeted dump.
  */
-#define DUMP_FULL_EXT_CONFIG 1
+#define DUMP_FULL_EXT_CONFIG 0
 
 #define PCI_EXT_CAP_ID_VSEC       0x000B
 #define PCI_EXT_CAP_ID_REBAR      0x0015
@@ -1302,6 +1304,173 @@ PrintNvidiaVsec (
   Print(L"      0x610 remains untouched.\n");
 }
 
+
+/**
+  Report the firmware's root-bridge resource apertures and whether the
+  host-bridge resource-allocation protocol is still exposed.
+
+  This is deliberately query-only. Configuration() returns the root
+  bridge's current resource descriptors; it does not report arbitrary free
+  address space. GetAllocAttributes() is also query-only. We do not call
+  NotifyPhase(), SubmitResources(), SetBusNumbers(), or any allocation phase
+  method from this application.
+**/
+STATIC
+VOID
+PrintRootBridgeResourceMaps (
+  IN EFI_HANDLE ImageHandle
+  )
+{
+  EFI_STATUS Status;
+  EFI_HANDLE *RootHandles;
+  UINTN RootCount;
+  UINTN Index;
+  EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *RootIo;
+  EFI_PCI_HOST_BRIDGE_RESOURCE_ALLOCATION_PROTOCOL *HostAlloc;
+  VOID *Resources;
+  EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR *Descriptor;
+  UINTN DescriptorIndex;
+  UINT64 AllocationAttributes;
+  EFI_HANDLE ParentHandle;
+  BOOLEAN SawDescriptor;
+
+  RootHandles = NULL;
+  RootCount = 0;
+
+  Print(L"\n=== PCI ROOT-BRIDGE RESOURCE MAPS (READ ONLY) ===\n");
+
+  Status = gBS->LocateHandleBuffer(
+                  ByProtocol,
+                  &gEfiPciRootBridgeIoProtocolGuid,
+                  NULL,
+                  &RootCount,
+                  &RootHandles
+                  );
+  if (EFI_ERROR(Status)) {
+    Print(L"Root bridge protocol enumeration failed: %r\n", Status);
+    return;
+  }
+
+  Print(L"PCI root-bridge handles: %u\n", RootCount);
+
+  for (Index = 0; Index < RootCount; Index++) {
+    RootIo = NULL;
+    Resources = NULL;
+    HostAlloc = NULL;
+    ParentHandle = NULL;
+
+    Status = gBS->OpenProtocol(
+                    RootHandles[Index],
+                    &gEfiPciRootBridgeIoProtocolGuid,
+                    (VOID **)&RootIo,
+                    ImageHandle,
+                    NULL,
+                    EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                    );
+    if (EFI_ERROR(Status) || RootIo == NULL) {
+      Print(L"  root[%u]: open failed: %r\n", Index, Status);
+      continue;
+    }
+
+    ParentHandle = RootIo->ParentHandle;
+    Print(
+      L"  root[%u]: handle=%p segment=%04x parent-host-bridge=%p\n",
+      Index,
+      RootHandles[Index],
+      RootIo->SegmentNumber,
+      ParentHandle
+      );
+
+    Status = RootIo->Configuration(RootIo, &Resources);
+    if (EFI_ERROR(Status)) {
+      Print(L"    Configuration(): %r\n", Status);
+    } else if (Resources == NULL) {
+      Print(L"    Configuration(): success, NULL descriptor list\n");
+    } else {
+      Descriptor = (EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR *)Resources;
+      SawDescriptor = FALSE;
+
+      for (DescriptorIndex = 0; DescriptorIndex < 64; DescriptorIndex++) {
+        if (Descriptor->Desc == ACPI_END_TAG_DESCRIPTOR) {
+          break;
+        }
+        if (Descriptor->Desc != ACPI_ADDRESS_SPACE_DESCRIPTOR) {
+          Print(
+            L"    unexpected resource descriptor type=%02x; stopping\n",
+            Descriptor->Desc
+            );
+          break;
+        }
+
+        SawDescriptor = TRUE;
+        Print(
+          L"    aperture[%u]: type=%u granularity=%u flags=%02x min=%016Lx max=%016Lx length=%016Lx translation=%016Lx\n",
+          DescriptorIndex,
+          Descriptor->ResType,
+          Descriptor->AddrSpaceGranularity,
+          Descriptor->SpecificFlag,
+          Descriptor->AddrRangeMin,
+          Descriptor->AddrRangeMax,
+          Descriptor->AddrLen,
+          Descriptor->AddrTranslationOffset
+          );
+        Descriptor++;
+      }
+
+      if (!SawDescriptor) {
+        Print(L"    no address-space descriptors returned\n");
+      }
+      if (DescriptorIndex == 64) {
+        Print(L"    descriptor display limit reached\n");
+      }
+      /* Per UEFI, Configuration() owns this buffer; do not FreePool(). */
+    }
+
+    if (ParentHandle != NULL) {
+      Status = gBS->HandleProtocol(
+                      ParentHandle,
+                      &gEfiPciHostBridgeResourceAllocationProtocolGuid,
+                      (VOID **)&HostAlloc
+                      );
+      if (EFI_ERROR(Status) || HostAlloc == NULL) {
+        Print(L"    host-bridge resource-allocation protocol: not exposed (%r)\n", Status);
+      } else {
+        AllocationAttributes = 0;
+        Status = HostAlloc->GetAllocAttributes(
+                              HostAlloc,
+                              RootHandles[Index],
+                              &AllocationAttributes
+                              );
+        if (EFI_ERROR(Status)) {
+          Print(L"    GetAllocAttributes(): %r\n", Status);
+        } else {
+          Print(
+            L"    host-bridge allocation attributes: %016Lx\n",
+            AllocationAttributes
+            );
+        }
+        Print(L"    NOTE: protocol presence does not mean late reallocation is legal.\n");
+      }
+    } else {
+      Print(L"    host-bridge parent handle unavailable\n");
+    }
+
+    gBS->CloseProtocol(
+           RootHandles[Index],
+           &gEfiPciRootBridgeIoProtocolGuid,
+           ImageHandle,
+           NULL
+           );
+  }
+
+  if (RootHandles != NULL) {
+    FreePool(RootHandles);
+  }
+
+  Print(L"=== END ROOT-BRIDGE RESOURCE MAPS ===\n");
+  Print(L"NOTE: these are firmware-reported current apertures, not a free-MMIO map.\n");
+}
+
 /**
   UEFI application entry point.
 **/
@@ -1350,6 +1519,8 @@ UefiMain (
   Print(L"\n=== GeForce BAR1 UEFI - READ-ONLY PCI RESOURCE SCAN ===\n");
   Print(L"Firmware inventory only. No PCI writes, driver disconnects, or device removal.\n");
   Print(L"BAR1 target for feasibility checks: %016Lx bytes (8 GiB).\n\n", BAR1_TARGET_BYTES);
+  PrintRootBridgeResourceMaps(ImageHandle);
+  Print(L"\n");
 
   Status = gBS->LocateHandleBuffer(
                   ByProtocol,
