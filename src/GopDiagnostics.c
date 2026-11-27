@@ -445,9 +445,14 @@ RunNvidiaGopPostResizeDiagnostics (
 
     SetModeStatus =
       Gop->SetMode(Gop, Snapshot->ModeNumber);
-  } if (!EFI_ERROR(SetModeStatus)) {
+  }
+  
+  ReportNvidiaGopFramebuffer(L"before SetMode", Gop);
+  
+  if (!EFI_ERROR(SetModeStatus)) {
     ReportNvidiaGopFramebuffer(L"after SetMode", Gop);
   }
+  
   Print(
     L"GOP SetMode(saved=%u): %r\n",
     (Snapshot != NULL && Snapshot->Valid) ?
