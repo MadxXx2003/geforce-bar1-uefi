@@ -11,7 +11,7 @@ on:
       - 'README.md'
       - '.github/workflows/build.yml'
   push:
-    branches: [ main, stage-2b-gcd-mmio-audit ]
+    branches: [ main ]
     paths:
       - 'src/**'
       - '*.inf'
@@ -109,6 +109,9 @@ jobs:
           cp src/Bar1Resize.c edk2/GeForceBar1Uefi/src/
           cp src/GopDiagnostics.c edk2/GeForceBar1Uefi/src/
           cp src/GopDiagnostics.h edk2/GeForceBar1Uefi/src/
+          cp src/Bar1Log.c edk2/GeForceBar1Uefi/src/
+          cp src/Bar1Log.h edk2/GeForceBar1Uefi/src/
+          cp src/WindowsBoot.c edk2/GeForceBar1Uefi/src/
 
       - name: Register application in platform DSC
         working-directory: edk2
