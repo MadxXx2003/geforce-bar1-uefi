@@ -3,6 +3,7 @@
 #include <Protocol/PciIo.h>
 #include <Protocol/GraphicsOutput.h>
 #include <Protocol/DevicePath.h>
+#include <Protocol/DriverBinding.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiLib.h>
 #include <Library/MemoryAllocationLib.h>
