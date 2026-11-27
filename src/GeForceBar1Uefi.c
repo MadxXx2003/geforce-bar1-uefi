@@ -65,6 +65,14 @@
 
 #define BAR1_TARGET_BYTES         0x0000000200000000ULL /* 8 GiB */
 
+#define BAR1_TARGET_BASE          0x0000004200000000ULL
+#define BAR3_TARGET_BASE          0x00000041FE000000ULL
+#define BAR3_TARGET_BYTES         0x0000000002000000ULL /* 32 MiB */
+
+#define PREF_WINDOW_TARGET_BASE   BAR3_TARGET_BASE
+#define PREF_WINDOW_TARGET_BYTES  0x0000000202000000ULL /* 8 GiB + 32 MiB */
+#define PREF_WINDOW_TARGET_END    0x00000043FFFFFFFFULL
+
 
 STATIC
 EFI_STATUS
@@ -1495,6 +1503,55 @@ PrintNvidiaVsec (
   NotifyPhase(), SubmitResources(), SetBusNumbers(), or any allocation phase
   method from this application.
 **/
+/**
+  Print the known-good Linux allocation as the target for the UEFI port.
+
+  This is arithmetic and reporting only. It does not reserve or program
+  PCI resources.
+**/
+STATIC
+VOID
+PrintLinuxTargetResourcePlan (
+  VOID
+  )
+{
+  UINT64 Bar3End;
+  UINT64 Bar1End;
+  UINT64 WindowEnd;
+
+  Bar3End = BAR3_TARGET_BASE + BAR3_TARGET_BYTES - 1;
+  Bar1End = BAR1_TARGET_BASE + BAR1_TARGET_BYTES - 1;
+  WindowEnd = PREF_WINDOW_TARGET_BASE + PREF_WINDOW_TARGET_BYTES - 1;
+
+  Print(L"\n=== STEP 4: LINUX-REFERENCE RESOURCE PLAN (READ ONLY) ===\n");
+
+  Print(L"BAR3:        %016Lx - %016Lx (%016Lx bytes)\n",
+        BAR3_TARGET_BASE, Bar3End, BAR3_TARGET_BYTES);
+
+  Print(L"BAR1:        %016Lx - %016Lx (%016Lx bytes)\n",
+        BAR1_TARGET_BASE, Bar1End, BAR1_TARGET_BYTES);
+
+  Print(L"PREF bridge: %016Lx - %016Lx (%016Lx bytes)\n",
+        PREF_WINDOW_TARGET_BASE, WindowEnd, PREF_WINDOW_TARGET_BYTES);
+
+  Print(L"BAR3 immediately precedes BAR1: %s\n",
+        (Bar3End + 1 == BAR1_TARGET_BASE) ? L"YES" : L"NO");
+
+  Print(L"BAR1 base is 8-GiB aligned:      %s\n",
+        ((BAR1_TARGET_BASE & (BAR1_TARGET_BYTES - 1)) == 0)
+          ? L"YES" : L"NO");
+
+  Print(L"Bridge window covers both BARs: %s\n",
+        (PREF_WINDOW_TARGET_BASE <= BAR3_TARGET_BASE &&
+         WindowEnd >= Bar1End) ? L"YES" : L"NO");
+
+  Print(L"Required bridge-window type: 64-bit prefetchable\n");
+  Print(L"Reference: successful Linux PCI resource reassignment log.\n");
+  Print(L"No PCI or GCD resource was modified.\n");
+
+  Print(L"=== END LINUX-REFERENCE RESOURCE PLAN ===\n");
+}
+
 STATIC
 VOID
 PrintRootBridgeResourceMaps (
@@ -1757,6 +1814,12 @@ PrintGcdMemorySpaceMap (
   UINT64 MaxUint64;
   BOOLEAN HasAlignedWindow;
   BOOLEAN PrintedAny;
+  UINT64 TargetEnd;
+  UINT64 DescriptorEnd;
+  
+  BOOLEAN TargetOverlap;
+  BOOLEAN TargetCoveredByFreeMmio;
+  BOOLEAN TargetCoveredByOtherType;
 
   Print(L"\n=== DXE GCD MEMORY-SPACE MAP (READ ONLY) ===\n");
 
@@ -1780,6 +1843,14 @@ PrintGcdMemorySpaceMap (
   Print(L"Target window size/alignment: %016Lx bytes\n", BAR1_TARGET_BYTES);
   MaxUint64 = ~(UINT64)0;
   PrintedAny = FALSE;
+  TargetEnd = PREF_WINDOW_TARGET_END;
+
+  TargetOverlap = FALSE;
+  TargetCoveredByFreeMmio = FALSE;
+  TargetCoveredByOtherType = FALSE;
+  
+  Print(L"Linux-reference prefetchable bridge range: %016Lx-%016Lx\n",
+        PREF_WINDOW_TARGET_BASE, TargetEnd);
 
   for (Index = 0; Index < DescriptorCount; Index++) {
     Descriptor = &Map[Index];
@@ -1815,6 +1886,42 @@ PrintGcdMemorySpaceMap (
       Descriptor->ImageHandle,
       Descriptor->DeviceHandle
       );
+    /*
+     * Audit the complete 8224-MiB bridge aperture required by the
+     * successful Linux allocation.
+     */
+    if ((Descriptor->Length != 0) &&
+        (Descriptor->BaseAddress <= MaxUint64 - (Descriptor->Length - 1))) {
+    
+      DescriptorEnd =
+        Descriptor->BaseAddress + Descriptor->Length - 1;
+    
+      if ((Descriptor->BaseAddress <= TargetEnd) &&
+          (DescriptorEnd >= PREF_WINDOW_TARGET_BASE)) {
+    
+        TargetOverlap = TRUE;
+    
+        Print(L"           OVERLAPS required Linux prefetchable bridge range\n");
+    
+        if ((Descriptor->BaseAddress <= PREF_WINDOW_TARGET_BASE) &&
+            (DescriptorEnd >= TargetEnd)) {
+    
+          if ((Descriptor->GcdMemoryType == EfiGcdMemoryTypeMemoryMappedIo) &&
+              (Descriptor->ImageHandle == NULL)) {
+    
+            TargetCoveredByFreeMmio = TRUE;
+    
+            Print(L"           FULL 8224-MiB target is inside unowned GCD MMIO\n");
+    
+          } else {
+    
+            TargetCoveredByOtherType = TRUE;
+    
+            Print(L"           FULL target is covered, but not by unowned MMIO\n");
+          }
+        }
+      }
+    }
 
     HasAlignedWindow = FindAlignedWindow(
                          Descriptor->BaseAddress,
@@ -1848,6 +1955,19 @@ PrintGcdMemorySpaceMap (
     Print(L"No MMIO or target-sized GCD descriptors were reported.\n");
   }
 
+  Print(L"Linux target-range overlap observed: %s\n",
+        TargetOverlap ? L"YES" : L"NO");
+
+  Print(L"Full target inside unowned MMIO descriptor: %s\n",
+        TargetCoveredByFreeMmio ? L"YES" : L"NO");
+  
+  if (TargetCoveredByOtherType) {
+    Print(L"WARNING: target range is covered by a non-free-MMIO GCD descriptor.\n");
+  }
+  
+  if (!TargetCoveredByFreeMmio) {
+    Print(L"WARNING: GCD does not prove the complete Linux bridge window is free MMIO.\n");
+  }
   FreePool(Map);
   Print(L"No GCD ranges were added, allocated, freed, or modified.\n");
   Print(L"=== END GCD MAP ===\n");
@@ -1901,6 +2021,9 @@ UefiMain (
   Print(L"\n=== GeForce BAR1 UEFI - READ-ONLY PCI RESOURCE SCAN ===\n");
   Print(L"Firmware inventory only. No PCI writes, driver disconnects, or device removal.\n");
   Print(L"BAR1 target for feasibility checks: %016Lx bytes (8 GiB).\n\n", BAR1_TARGET_BYTES);
+  
+  PrintLinuxTargetResourcePlan();
+  
   PrintRootBridgeResourceMaps(ImageHandle);
   PrintGcdMemorySpaceMap();
   Print(L"\n");
