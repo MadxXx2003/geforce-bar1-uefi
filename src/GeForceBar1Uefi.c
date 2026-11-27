@@ -1303,6 +1303,14 @@ PrintBridgeWindows (
     }
 
     Print(
+      L"      PREF raw: reg24=%08x base-upper=%08x limit-upper=%08x type-nibble=%x\n",
+      PrefWindow,
+      PrefBaseUpper,
+      PrefLimitUpper,
+      PrefWindow & 0x0F
+      );
+    
+    Print(
       L"      PREF window: base=%08x%08x limit=%08x%08x type=%s\n",
       (UINT32)(PrefBase64 >> 32),
       (UINT32)PrefBase64,
@@ -1694,7 +1702,27 @@ PrintRootBridgeResourceMaps (
             (AllocationAttributes & EFI_PCI_HOST_BRIDGE_MEM64_DECODE) != 0 ? L"yes" : L"no"
             );
         }
-        Print(L"    NOTE: protocol presence does not mean late reallocation is legal.\n");
+        Print(
+          L"    host-bridge method availability: NotifyPhase=%s GetNextRootBridge=%s "
+          L"GetAllocAttributes=%s StartBusEnumeration=%s SetBusNumbers=%s "
+          L"SubmitResources=%s GetProposedResources=%s PreprocessController=%s\n",
+        
+          HostAlloc->NotifyPhase != NULL ? L"yes" : L"no",
+          HostAlloc->GetNextRootBridge != NULL ? L"yes" : L"no",
+          HostAlloc->GetAllocAttributes != NULL ? L"yes" : L"no",
+          HostAlloc->StartBusEnumeration != NULL ? L"yes" : L"no",
+          HostAlloc->SetBusNumbers != NULL ? L"yes" : L"no",
+          HostAlloc->SubmitResources != NULL ? L"yes" : L"no",
+          HostAlloc->GetProposedResources != NULL ? L"yes" : L"no",
+          HostAlloc->PreprocessController != NULL ? L"yes" : L"no"
+          );
+        
+        Print(L"    No host-bridge phase or allocation method was invoked.\n");
+        
+        Print(L"    SubmitResources/NotifyPhase/SetResources are enumeration-phase "
+              L"operations, not a safe late-resize API.\n");
+        
+        Print(L"    Protocol presence does not prove late reallocation is legal.\n");
       }
     } else {
       Print(L"    host-bridge parent handle unavailable\n");
