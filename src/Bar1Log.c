@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <Uefi.h>
 
 #include <Protocol/LoadedImage.h>
