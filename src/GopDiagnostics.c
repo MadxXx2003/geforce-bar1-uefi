@@ -572,6 +572,180 @@ RunNvidiaGopPostResizeDiagnostics (
   Bar1LogEvent(L"GOP diagnostics: completed");
 }
 
+VOID
+EFIAPI
+RunNvidiaGopPostResizeDiagnostics (
+  IN EFI_HANDLE ImageHandle,
+  IN CONST NVIDIA_GOP_SNAPSHOT *Snapshot
+  )
+{
+  EFI_STATUS Status;
+  EFI_STATUS ReadBefore, WriteBefore;
+  EFI_STATUS ReadAfter, WriteAfter;
+  EFI_STATUS RelocateStatus;
+  EFI_HANDLE Handle;
+  EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop;
+  BOOLEAN SameHandle;
+  UINT64 FrameBufferOffset;
+  UINT64 NewFrameBufferBase;
+
+  Bar1LogEvent(L"GOP diagnostics: ENTER OpenNvidiaGop");
+
+  Status = OpenNvidiaGop(ImageHandle, &Handle, &Gop);
+  Bar1LogStatus(L"GOP diagnostics: OpenNvidiaGop", Status);
+
+  if (EFI_ERROR(Status)) {
+    Print(L"GOP post: NVIDIA GOP unavailable (%r)\n", Status);
+    return;
+  }
+
+  if (Gop->Mode == NULL || Gop->Mode->Info == NULL) {
+    Print(L"GOP post: mode information unavailable\n");
+    CloseNvidiaGop(ImageHandle, Handle);
+    return;
+  }
+
+  SameHandle =
+    Snapshot != NULL &&
+    Snapshot->Valid &&
+    Snapshot->Handle == Handle;
+
+  Print(
+    L"GOP post: handle=%s mode=%u %ux%u fb=%016Lx/%Lu\n",
+    SameHandle ? L"same" : L"changed",
+    Gop->Mode->Mode,
+    Gop->Mode->Info->HorizontalResolution,
+    Gop->Mode->Info->VerticalResolution,
+    Gop->Mode->FrameBufferBase,
+    Gop->Mode->FrameBufferSize
+    );
+
+  //
+  // Test the original GOP before changing its framebuffer descriptor.
+  //
+  Bar1LogEvent(L"GOP move: ENTER original framebuffer BLT test");
+
+  Status = GopBltRoundTrip(Gop, &ReadBefore, &WriteBefore);
+
+  Bar1LogStatus(L"GOP move: original framebuffer BLT test", Status);
+
+  Print(
+    L"GOP original BLT: read=%r write=%r result=%r\n",
+    ReadBefore,
+    WriteBefore,
+    Status
+    );
+
+  //
+  // Calculate the framebuffer's offset inside the old BAR1 aperture.
+  // Preserve that offset in the new 8-GiB BAR1 aperture.
+  //
+  RelocateStatus = EFI_ABORTED;
+  FrameBufferOffset = 0;
+  NewFrameBufferBase = 0;
+
+  if (Snapshot == NULL || !Snapshot->Valid) {
+    RelocateStatus = EFI_NOT_FOUND;
+
+  } else if (!SameHandle) {
+    RelocateStatus = EFI_ABORTED;
+
+  } else if (Snapshot->FrameBufferBase < NVIDIA_OLD_BAR1_BASE) {
+    RelocateStatus = EFI_INVALID_PARAMETER;
+
+  } else if (Gop->Mode->FrameBufferBase != Snapshot->FrameBufferBase) {
+    RelocateStatus = EFI_ABORTED;
+
+  } else if (Gop->Mode->FrameBufferSize != Snapshot->FrameBufferSize) {
+    RelocateStatus = EFI_ABORTED;
+
+  } else {
+    FrameBufferOffset =
+      Snapshot->FrameBufferBase - NVIDIA_OLD_BAR1_BASE;
+
+    if (FrameBufferOffset > NVIDIA_NEW_BAR1_SIZE ||
+        (UINT64)Snapshot->FrameBufferSize >
+          NVIDIA_NEW_BAR1_SIZE - FrameBufferOffset) {
+
+      RelocateStatus = EFI_BAD_BUFFER_SIZE;
+
+    } else {
+      NewFrameBufferBase =
+        NVIDIA_NEW_BAR1_BASE + FrameBufferOffset;
+
+      Print(L"\n=== GOP FRAMEBUFFER ADDRESS RELOCATION ===\n");
+      Print(L"Old framebuffer:       %016Lx\n",
+            Snapshot->FrameBufferBase);
+      Print(L"Framebuffer offset:    %016Lx\n",
+            FrameBufferOffset);
+      Print(L"New BAR1 base:         %016Lx\n",
+            NVIDIA_NEW_BAR1_BASE);
+      Print(L"New framebuffer:       %016Lx\n",
+            NewFrameBufferBase);
+      Print(L"Framebuffer size:      %Lu\n",
+            Snapshot->FrameBufferSize);
+
+      Bar1LogEvent(
+        L"GOP move: ENTER update public FrameBufferBase"
+        );
+
+      Gop->Mode->FrameBufferBase = NewFrameBufferBase;
+
+      if (Gop->Mode->FrameBufferBase == NewFrameBufferBase) {
+        RelocateStatus = EFI_SUCCESS;
+      } else {
+        RelocateStatus = EFI_DEVICE_ERROR;
+      }
+
+      Bar1LogStatus(
+        L"GOP move: public FrameBufferBase update",
+        RelocateStatus
+        );
+
+      Print(
+        L"GOP framebuffer descriptor update: %r\n",
+        RelocateStatus
+        );
+      Print(L"=== END GOP FRAMEBUFFER RELOCATION ===\n");
+    }
+  }
+
+  //
+  // Do not call SetMode here. We want to test the relocated address
+  // without asking NVIDIA's driver to reinitialize the display.
+  //
+  if (!EFI_ERROR(RelocateStatus)) {
+    ReportNvidiaGopFramebuffer(L"after address relocation", Gop);
+
+    Bar1LogEvent(
+      L"GOP move: ENTER BLT test using relocated framebuffer descriptor"
+      );
+
+    Status = GopBltRoundTrip(Gop, &ReadAfter, &WriteAfter);
+
+    Bar1LogStatus(
+      L"GOP move: relocated framebuffer BLT test",
+      Status
+      );
+
+    Print(
+      L"GOP relocated BLT: read=%r write=%r result=%r\n",
+      ReadAfter,
+      WriteAfter,
+      Status
+      );
+  } else {
+    Print(
+      L"GOP framebuffer relocation skipped/failed: %r\n",
+      RelocateStatus
+      );
+  }
+
+  Bar1LogEvent(L"GOP diagnostics: ENTER CloseNvidiaGop");
+  CloseNvidiaGop(ImageHandle, Handle);
+  Bar1LogEvent(L"GOP diagnostics: completed");
+}
+
 STATIC
 EFI_STATUS
 FindPciController (
