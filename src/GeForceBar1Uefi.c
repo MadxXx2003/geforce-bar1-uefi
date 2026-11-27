@@ -81,6 +81,13 @@
 #define PREF_WINDOW_TARGET_BYTES  0x0000000202000000ULL /* 8 GiB + 32 MiB */
 #define PREF_WINDOW_TARGET_END    0x00000043FFFFFFFFULL
 
+/* Implemented in src/Bar1Resize.c; invoked only after the read-only scan. */
+EFI_STATUS
+EFIAPI
+RunBar1ResizeTransaction (
+  IN EFI_HANDLE ImageHandle
+  );
+
 
 STATIC
 EFI_STATUS
@@ -2509,8 +2516,14 @@ UefiMain (
   }
 
   Print(L"=== END SCAN ===\n");
-  Print(L"IMPORTANT: read-only. No BAR resize, PCI config write, or driver disconnect was attempted.\n");
+  Print(L"The inventory phase above was read-only.\n");
   Print(L"NOTE: GetBarAttributes reports firmware resource descriptors; it does not enumerate all free host MMIO space.\n");
 
+  Status = RunBar1ResizeTransaction(ImageHandle);
+  if (EFI_ERROR(Status)) {
+    Print(L"BAR1 resize transaction returned: %r\n", Status);
+    return Status;
+  }
+ 
   return EFI_SUCCESS;
 }

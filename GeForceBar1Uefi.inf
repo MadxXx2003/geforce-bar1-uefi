@@ -11,6 +11,7 @@
 
 [Sources]
   src/GeForceBar1Uefi.c
+  src/Bar1Resize.c
 
 [Packages]
   MdePkg/MdePkg.dec
