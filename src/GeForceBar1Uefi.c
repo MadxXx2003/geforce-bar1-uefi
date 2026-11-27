@@ -25,6 +25,7 @@
 #include <Library/MemoryAllocationLib.h>
 #include <Pi/PiDxeCis.h>
 #include <Library/DxeServicesTableLib.h>
+#include "GopDiagnostics.h"
 
 #define NVIDIA_VENDOR_ID          0x10DE
 #define NVIDIA_TARGET_DEVICE_ID   0x1F36
@@ -2519,7 +2520,14 @@ UefiMain (
   Print(L"The inventory phase above was read-only.\n");
   Print(L"NOTE: GetBarAttributes reports firmware resource descriptors; it does not enumerate all free host MMIO space.\n");
 
+  (VOID)CaptureNvidiaGop(ImageHandle, &GopSnapshot);
+  
   Status = RunBar1ResizeTransaction(ImageHandle);
+
+  // Run even if the transaction reports an error, so we can see
+  // whether the display state survived a failed or rolled-back attempt.
+  RunNvidiaGopPostResizeDiagnostics(ImageHandle, &GopSnapshot);
+  
   if (EFI_ERROR(Status)) {
     Print(L"BAR1 resize transaction returned: %r\n", Status);
     return Status;
