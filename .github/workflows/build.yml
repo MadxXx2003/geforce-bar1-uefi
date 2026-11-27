@@ -106,6 +106,7 @@ jobs:
           mkdir -p edk2/GeForceBar1Uefi/src
           cp GeForceBar1Uefi.inf edk2/GeForceBar1Uefi/
           cp src/GeForceBar1Uefi.c edk2/GeForceBar1Uefi/src/
+          cp src/Bar1Resize.c edk2/GeForceBar1Uefi/src/
 
       - name: Register application in platform DSC
         working-directory: edk2
