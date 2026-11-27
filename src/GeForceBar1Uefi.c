@@ -53,7 +53,9 @@
 //
 // Set to 1 only when deliberately testing NVIDIA GOP recovery.
 //
-#define ENABLE_NVIDIA_GOP_DRIVER_RECONNECT 1
+// Do not turn it unless you want a system crash at  Reconnect: ENTER ConnectController(GPU)
+//
+#define ENABLE_NVIDIA_GOP_DRIVER_RECONNECT 0 
 
 #define PCI_EXT_CAP_ID_VSEC       0x000B
 #define PCI_EXT_CAP_ID_REBAR      0x0015
