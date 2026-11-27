@@ -2116,50 +2116,40 @@ PrintRootBridgeResourceMaps (
     /*
      * Final verdict for this root bridge.
      */
-    Print(L"\n    === TARGET FORWARDING PREFLIGHT ===\n");
-
-    if (!TargetCoveredByRootAperture) {
-      Print(
-        L"    NO-GO: firmware's root-bridge memory aperture does not\n"
-        );
-
-      Print(
-        L"           identity-map the complete target range:\n"
-        );
-
-      Print(
-        L"           %016Lx - %016Lx\n",
-        PREF_WINDOW_TARGET_BASE,
-        PREF_WINDOW_TARGET_BASE + PREF_WINDOW_TARGET_BYTES - 1
-        );
-
-      Print(
-        L"           A GCD reservation and downstream bridge-window\n"
-        L"           programming cannot expand the root-complex aperture.\n"
-        );
-
-    } else if (!HostAllocAttributesValid) {
-      Print(
-        L"    INCONCLUSIVE: root aperture covers the target, but\n"
-        L"                  host-bridge allocation attributes are unavailable.\n"
-        );
-
-    } else if (!HostMem64Decode) {
-      Print(
-        L"    NO-GO: host bridge does not advertise 64-bit memory decode.\n"
-        );
-
+    Print(L"\n    === ROOT-BRIDGE RESOURCE AUDIT ===\n");
+    
+    if (TargetCoveredByRootAperture && HostAllocAttributesValid &&
+        HostMem64Decode) {
+    
+      Print(L"    ROOT-BRIDGE DESCRIPTOR: target range covered\n");
+      Print(L"    HOST BRIDGE 64-BIT DECODE: advertised\n");
+    
     } else {
-      Print(
-        L"    REPORTED-RESOURCE PASS: root aperture covers the target\n"
-        L"                           and host bridge advertises 64-bit decode.\n"
-        );
-
-      Print(
-        L"    IMPORTANT: this does NOT prove live MMIO forwarding.\n"
-        L"    No target BAR-space read or write was attempted.\n"
-        );
+    
+      Print(L"    ROOT-BRIDGE DESCRIPTOR: does not describe the full target\n");
+    
+      if (!HostAllocAttributesValid) {
+        Print(L"    HOST BRIDGE ATTRIBUTES: unavailable\n");
+      } else {
+        Print(L"    HOST BRIDGE 64-BIT DECODE: %s\n",
+              HostMem64Decode ? L"advertised" : L"not advertised");
+      }
     }
+    
+    Print(L"\n    Linux reference aperture: 4000000000-7FFFFFFFFF\n");
+    Print(L"    Linux-tested target:      41FE000000-43FFFFFFFF\n");
+    
+    Print(L"    GCD registration and root-bridge Configuration() are\n");
+    Print(L"    separate resource descriptions.\n");
+    
+    Print(L"    No host-bridge allocation phase was invoked.\n");
+    Print(L"    No host-bridge resources were reallocated.\n");
+    Print(L"    No conclusion about physical forwarding is made here.\n");
+          Print(
+            L"    IMPORTANT: this does NOT prove live MMIO forwarding.\n"
+            L"    No target BAR-space read or write was attempted.\n"
+            );
+        }
 
     Print(L"    No host-bridge allocation phase was invoked.\n");
 
