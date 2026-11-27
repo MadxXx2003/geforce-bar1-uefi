@@ -2702,7 +2702,7 @@ PostResizeDiagnostics:
   //
   RunNvidiaGopPostResizeDiagnostics(ImageHandle, &GopSnapshot);
   
-  #if ENABLE_NVIDIA_GOP_DRIVER_RECONNECT
+#if ENABLE_NVIDIA_GOP_DRIVER_RECONNECT
   
   //
   // Experimental phase: only run after a successful BAR1 transaction.
@@ -2742,7 +2742,7 @@ PostResizeDiagnostics:
     }
   }
   
-  #endif
+#endif
   
   if (EFI_ERROR(TransactionStatus)) {
     Print(L"\nBAR1 resize transaction returned: %r\n",
