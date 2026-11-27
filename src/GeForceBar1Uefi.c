@@ -1884,7 +1884,6 @@ UefiMain (
 
   UINT8 BaseClass;
   UINT8 SubClass;
-  UINT8 ProgIf;
   UINT8 HeaderType;
 
   UINTN BarCount;
