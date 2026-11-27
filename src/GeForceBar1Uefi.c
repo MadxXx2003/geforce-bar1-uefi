@@ -2366,7 +2366,6 @@ UefiMain (
   //
   Print(L"\n=== GeForce BAR1 UEFI - POST-TRANSACTION RESOURCE SCAN ===\n");
   Print(L"PCI/GCD inventory captured after the resize transaction.\n");
-  Print(L"The NVIDIA 0x610 override probe temporarily changes and restores its register state.\n");
   Print(L"BAR1 target: %016Lx bytes (8 GiB).\n\n", BAR1_TARGET_BYTES);
 
   PrintLinuxTargetResourcePlan();
@@ -2494,38 +2493,33 @@ UefiMain (
       HeaderType
       );
 
+
     if (Vendor == NVIDIA_VENDOR_ID) {
       PrintParentBridge(Records, HandleCount, Segment, Bus);
       PrintBars(PciIo, BarCount);
       PrintBarResources(PciIo, BarCount);
       PrintProtocolOwners(Handles[Index], ImageHandle);
-
+    
       if (IsNvidiaDisplay) {
         Print(L"    NVIDIA display controller candidate\n");
-
+    
         /* Raw data first: independent evidence for decoded results. */
         PrintRawConfigDump(PciIo);
         PrintExtendedCapabilities(PciIo);
         PrintNvidiaVsec(PciIo, HeaderType);
-
-        if (Segment == 0 &&
-            Bus == 1 &&
-            Device == 0 &&
-            Function == 0 &&
-            DeviceId == NVIDIA_TARGET_DEVICE_ID) {
-        Print(L"    NVIDIA companion/other function\n");
       } else {
         Print(L"    NVIDIA companion/other function\n");
       }
+    
     } else if (IsRootPort) {
       Print(L"    Intel root-port candidate\n");
-
+    
       if (HeaderType != PCI_HEADER_TYPE_BRIDGE) {
         Print(L"    WARNING: expected Type 1 bridge header\n");
       }
-
+    
       PrintBars(PciIo, BarCount);
-
+    
       if (HeaderType == PCI_HEADER_TYPE_BRIDGE) {
         PrintBridgeWindows(PciIo);
       }
