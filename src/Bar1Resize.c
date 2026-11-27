@@ -209,6 +209,7 @@ CheckIdentity(EFI_PCI_IO_PROTOCOL *PciIo, UINT16 Vendor, UINT16 Device)
   return EFI_SUCCESS;
 }
 
+#if REQUIRE_RESIZE_CONFIRMATION
 STATIC
 EFI_STATUS
 WaitForResizeConfirmation(VOID)
@@ -239,6 +240,7 @@ WaitForResizeConfirmation(VOID)
   ImageHandle is used as the GCD allocation owner. The caller should invoke
   this only after its read-only scan has completed.
 **/
+#endif
 EFI_STATUS
 EFIAPI
 RunBar1ResizeTransaction(IN EFI_HANDLE ImageHandle)
