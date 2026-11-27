@@ -63,6 +63,14 @@
 #define NVIDIA_REBAR_OFFSET       0xBB0
 #define NVIDIA_BAR1_CAP_OFFSET    0xBBC
 
+#define NVIDIA_OVERRIDE_MASK       0x00000F80U
+#define NVIDIA_OVERRIDE_ENABLE     0x00000800U
+#define NVIDIA_OVERRIDE_VAL        7U
+#define NVIDIA_OVERRIDE_FIELD      \
+  (NVIDIA_OVERRIDE_ENABLE | (NVIDIA_OVERRIDE_VAL << 7))
+
+#define NVIDIA_BAR1_TARGET_CAP_BIT (1U << 17)
+
 #define BAR1_TARGET_BYTES         0x0000000200000000ULL /* 8 GiB */
 
 #define BAR1_TARGET_BASE          0x0000004200000000ULL
@@ -1518,6 +1526,288 @@ PrintNvidiaVsec (
   PCI resources.
 **/
 STATIC
+EFI_STATUS
+ProbeNvidiaOverride8GiB (
+  IN EFI_PCI_IO_PROTOCOL *PciIo
+  )
+{
+  EFI_STATUS Status;
+  EFI_STATUS RestoreStatus;
+  UINT32 IdReg, ClassReg, HeaderReg;
+  UINT32 VsecOffset, RebarOffset;
+  UINT32 VsecHeader, VsecBody, OverrideSupport;
+  UINT32 OriginalOverride, CurrentOverride, TargetOverride;
+  UINT32 RebarHeader, Bar1Control;
+  UINT32 CapBefore, CapArmed, CapRestored;
+  UINT32 RestoreValue;
+  BOOLEAN WriteAttempted = FALSE;
+  BOOLEAN ProbePassed = FALSE;
+
+  Print(L"\n=== NVIDIA 8-GiB 0x610 OVERRIDE PROBE ===\n");
+  Print(L"Temporary PCI config write; no BAR resizing is performed.\n");
+
+  if (PciIo == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  /* Exact device identity. */
+  Status = ReadConfig32(PciIo, 0x00, &IdReg);
+  if (EFI_ERROR(Status) ||
+      (IdReg & 0xFFFF) != NVIDIA_VENDOR_ID ||
+      (IdReg >> 16) != NVIDIA_TARGET_DEVICE_ID) {
+    Print(L"ABORT: target identity mismatch.\n");
+    return EFI_SECURITY_VIOLATION;
+  }
+
+  Status = ReadConfig32(PciIo, 0x08, &ClassReg);
+  if (EFI_ERROR(Status) ||
+      (UINT8)(ClassReg >> 24) != PCI_CLASS_DISPLAY ||
+      (UINT8)(ClassReg >> 16) != 0) {
+    Print(L"ABORT: unexpected PCI class.\n");
+    return EFI_SECURITY_VIOLATION;
+  }
+
+  Status = ReadConfig32(PciIo, 0x0C, &HeaderReg);
+  if (EFI_ERROR(Status) ||
+      (UINT8)((HeaderReg >> 16) & 0x7F) != PCI_HEADER_TYPE_ENDPOINT) {
+    Print(L"ABORT: not a Type 0 endpoint.\n");
+    return EFI_SECURITY_VIOLATION;
+  }
+
+  /* S1: VSEC location and header. */
+  Status = FindExtendedCapability(
+             PciIo, PCI_EXT_CAP_ID_VSEC, &VsecOffset);
+  if (EFI_ERROR(Status) || VsecOffset != NVIDIA_VSEC_OFFSET) {
+    Print(L"ABORT: S1 VSEC location failed.\n");
+    return EFI_COMPROMISED_DATA;
+  }
+
+  Status = ReadConfig32(PciIo, VsecOffset, &VsecHeader);
+  if (EFI_ERROR(Status) ||
+      (VsecHeader & 0xFFFF) != PCI_EXT_CAP_ID_VSEC ||
+      ((VsecHeader >> 16) & 0xF) != 1) {
+    Print(L"ABORT: S1 VSEC header failed.\n");
+    return EFI_COMPROMISED_DATA;
+  }
+
+  /* S2: VSEC body. */
+  Status = ReadConfig32(PciIo, VsecOffset + 4, &VsecBody);
+  if (EFI_ERROR(Status) ||
+      (VsecBody & 0xFFFF) != 0x0001 ||
+      ((VsecBody >> 16) & 0xF) != 1 ||
+      ((VsecBody >> 20) & 0xFFF) != 0x024) {
+    Print(L"ABORT: S2 VSEC body failed.\n");
+    return EFI_COMPROMISED_DATA;
+  }
+
+  /* S3: framebuffer override support. */
+  Status = ReadConfig32(
+             PciIo, VsecOffset + 0x0C, &OverrideSupport);
+  if (EFI_ERROR(Status) ||
+      (OverrideSupport & (1U << 11)) == 0 ||
+      (OverrideSupport & 0xFFFFE7F8U) != 0) {
+    Print(L"ABORT: S3 override support check failed.\n");
+    return EFI_UNSUPPORTED;
+  }
+
+  /* S4: original override field must be stock or validly armed. */
+  Status = ReadConfig32(
+             PciIo, VsecOffset + 0x10, &OriginalOverride);
+  if (EFI_ERROR(Status) ||
+      (OriginalOverride & 0xFFFFE07CU) != 0 ||
+      (((OriginalOverride & NVIDIA_OVERRIDE_MASK) != 0) &&
+       ((OriginalOverride & NVIDIA_OVERRIDE_ENABLE) == 0))) {
+    Print(L"ABORT: S4 override register check failed.\n");
+    return EFI_COMPROMISED_DATA;
+  }
+
+  /* S5: expected ReBAR capability location and BAR1 entry. */
+  Status = FindExtendedCapability(
+             PciIo, PCI_EXT_CAP_ID_REBAR, &RebarOffset);
+  if (EFI_ERROR(Status) || RebarOffset != NVIDIA_REBAR_OFFSET) {
+    Print(L"ABORT: S5 ReBAR location failed.\n");
+    return EFI_COMPROMISED_DATA;
+  }
+
+  Status = ReadConfig32(PciIo, RebarOffset, &RebarHeader);
+  if (EFI_ERROR(Status) ||
+      (RebarHeader & 0xFFFF) != PCI_EXT_CAP_ID_REBAR) {
+    Print(L"ABORT: ReBAR header invalid.\n");
+    return EFI_COMPROMISED_DATA;
+  }
+
+  Status = ReadConfig32(PciIo, NVIDIA_BAR1_CAP_OFFSET + 4, &Bar1Control);
+  if (EFI_ERROR(Status) || (Bar1Control & 7U) != REBAR_BAR1_INDEX) {
+    Print(L"ABORT: BAR1 ReBAR control entry mismatch.\n");
+    return EFI_COMPROMISED_DATA;
+  }
+
+  Status = ReadConfig32(PciIo, NVIDIA_BAR1_CAP_OFFSET, &CapBefore);
+  if (EFI_ERROR(Status)) {
+    Print(L"ABORT: cannot read BAR1 capability bitmap.\n");
+    return Status;
+  }
+
+  Print(L"Original 0x610:       %08x\n", OriginalOverride);
+  Print(L"Original BAR1 bitmap: %08x\n", CapBefore);
+  Print(L"Target override:      %08x\n",
+        (UINT32)NVIDIA_OVERRIDE_FIELD);
+
+  TargetOverride =
+    (OriginalOverride & ~NVIDIA_OVERRIDE_MASK) |
+    NVIDIA_OVERRIDE_FIELD;
+
+  /*
+   * Write only bits 11:7. The original bits outside this mask
+   * are preserved.
+   */
+  Status = PciIo->Pci.Write(
+                      PciIo,
+                      EfiPciIoWidthUint32,
+                      VsecOffset + 0x10,
+                      1,
+                      &TargetOverride);
+
+  WriteAttempted = TRUE;
+
+  if (EFI_ERROR(Status)) {
+    Print(L"0x610 write failed: %r\n", Status);
+  } else {
+    Status = ReadConfig32(
+               PciIo, VsecOffset + 0x10, &CurrentOverride);
+
+    if (!EFI_ERROR(Status) &&
+        (CurrentOverride & NVIDIA_OVERRIDE_MASK) ==
+          NVIDIA_OVERRIDE_FIELD) {
+
+      Print(L"0x610 armed: %08x PASS\n", CurrentOverride);
+
+      Status = ReadConfig32(
+                 PciIo, NVIDIA_BAR1_CAP_OFFSET, &CapArmed);
+
+      if (!EFI_ERROR(Status)) {
+        Print(L"Armed BAR1 bitmap: %08x\n", CapArmed);
+
+        if (((CapArmed & CapBefore) & 0xFFFFFFF0U) ==
+              (CapBefore & 0xFFFFFFF0U) &&
+            (CapArmed & NVIDIA_BAR1_TARGET_CAP_BIT) != 0) {
+          Print(L"Capability superset: PASS\n");
+          Print(L"8-GiB capability bit: PRESENT\n");
+          ProbePassed = TRUE;
+        } else {
+          Print(L"Capability verification FAILED.\n");
+        }
+      }
+    } else {
+      Print(L"0x610 did not latch the requested field.\n");
+    }
+  }
+
+  /*
+   * Restore even if the write/readback/capability verification failed.
+   */
+  if (WriteAttempted) {
+    RestoreStatus = ReadConfig32(
+                      PciIo, VsecOffset + 0x10, &RestoreValue);
+
+    if (!EFI_ERROR(RestoreStatus)) {
+      RestoreValue =
+        (RestoreValue & ~NVIDIA_OVERRIDE_MASK) |
+        (OriginalOverride & NVIDIA_OVERRIDE_MASK);
+
+      RestoreStatus = PciIo->Pci.Write(
+                                  PciIo,
+                                  EfiPciIoWidthUint32,
+                                  VsecOffset + 0x10,
+                                  1,
+                                  &RestoreValue);
+    }
+
+    if (!EFI_ERROR(RestoreStatus)) {
+      RestoreStatus = ReadConfig32(
+                        PciIo, VsecOffset + 0x10, &CurrentOverride);
+
+      if (!EFI_ERROR(RestoreStatus) &&
+          (CurrentOverride & NVIDIA_OVERRIDE_MASK) !=
+            (OriginalOverride & NVIDIA_OVERRIDE_MASK)) {
+        RestoreStatus = EFI_DEVICE_ERROR;
+      }
+    }
+
+    if (EFI_ERROR(RestoreStatus)) {
+      Print(L"CRITICAL: 0x610 RESTORE FAILED: %r\n", RestoreStatus);
+      Print(L"A reboot/reset may be required to clear the volatile state.\n");
+      return RestoreStatus;
+    }
+
+    Print(L"Original 0x610 field restored: PASS (%08x)\n",
+          CurrentOverride);
+
+    Status = ReadConfig32(
+               PciIo, NVIDIA_BAR1_CAP_OFFSET, &CapRestored);
+
+    if (!EFI_ERROR(Status)) {
+      Print(L"Restored BAR1 bitmap: %08x\n", CapRestored);
+
+      if (((CapRestored ^ CapBefore) & 0xFFFFFFF0U) == 0) {
+        Print(L"Capability bitmap restored: PASS\n");
+      } else {
+        Print(L"WARNING: capability bitmap differs from original.\n");
+      }
+    }
+  }
+
+  Print(L"PROBE RESULT: %s\n",
+        ProbePassed ? L"PASS" : L"FAIL");
+  Print(L"BAR1 resize attempted: NO\n");
+  Print(L"Bridge-window writes:  NO\n");
+  Print(L"=== END OVERRIDE PROBE ===\n");
+
+  return ProbePassed ? EFI_SUCCESS : EFI_DEVICE_ERROR;
+}
+
+STATIC
+BOOLEAN
+ConfirmOverrideProbe (
+  VOID
+  )
+{
+  EFI_STATUS Status;
+  EFI_INPUT_KEY Key;
+
+  Print(L"\nTemporarily arm 8-GiB override? Press Y to continue: ");
+
+  for (;;) {
+    Status = gST->ConIn->ReadKeyStroke(gST->ConIn, &Key);
+
+    if (Status == EFI_NOT_READY) {
+      UINTN Index = 0;
+      Status = gBS->WaitForEvent(
+                       1, &gST->ConIn->WaitForKey, &Index);
+      if (EFI_ERROR(Status)) {
+        return FALSE;
+      }
+      continue;
+    }
+
+    if (EFI_ERROR(Status)) {
+      return FALSE;
+    }
+
+    if (Key.UnicodeChar == L'y' || Key.UnicodeChar == L'Y') {
+      Print(L"YES\n");
+      return TRUE;
+    }
+
+    if (Key.UnicodeChar == L'n' || Key.UnicodeChar == L'N' ||
+        Key.UnicodeChar == CHAR_CARRIAGE_RETURN) {
+      Print(L"NO\n");
+      return FALSE;
+    }
+  }
+}
+
+STATIC
 VOID
 PrintLinuxTargetResourcePlan (
   VOID
@@ -2178,6 +2468,14 @@ UefiMain (
         PrintRawConfigDump(PciIo);
         PrintExtendedCapabilities(PciIo);
         PrintNvidiaVsec(PciIo, HeaderType);
+        if (Segment == 0 &&
+            Bus == 1 &&
+            Device == 0 &&
+            Function == 0 &&
+            DeviceId == NVIDIA_TARGET_DEVICE_ID &&
+            ConfirmOverrideProbe()) {
+          (VOID)ProbeNvidiaOverride8GiB(PciIo);
+        }
       } else {
         Print(L"    NVIDIA companion/other function\n");
       }
