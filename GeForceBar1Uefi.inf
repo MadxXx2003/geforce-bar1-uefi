@@ -6,7 +6,7 @@
   BASE_NAME                      = GeForceBar1Uefi
   FILE_GUID                      = 2F7E4B31-9E8D-4C1B-A64D-4A17D81A9B20
   MODULE_TYPE                    = UEFI_APPLICATION
-  VERSION_STRING                 = 0.4
+  VERSION_STRING                 = 0.5
   ENTRY_POINT                    = UefiMain
 
 [Sources]
@@ -28,5 +28,6 @@
   gEfiPciIoProtocolGuid
   gEfiGraphicsOutputProtocolGuid
   gEfiDevicePathProtocolGuid
+  gEfiDriverBindingProtocolGuid
   gEfiPciRootBridgeIoProtocolGuid
   gEfiPciHostBridgeResourceAllocationProtocolGuid
