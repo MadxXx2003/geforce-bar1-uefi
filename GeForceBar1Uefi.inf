@@ -1,12 +1,15 @@
 ## @file
-# Read-only PCI scanner for the GeForce BAR1 UEFI project.
-##
+# GeForce BAR1 UEFI application
+#
+# Copyright (c) 2026, Project Contributors.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 [Defines]
   INF_VERSION                    = 0x0001001B
   BASE_NAME                      = GeForceBar1Uefi
   FILE_GUID                      = 2F7E4B31-9E8D-4C1B-A64D-4A17D81A9B20
   MODULE_TYPE                    = UEFI_APPLICATION
-  VERSION_STRING                 = 0.6
+  VERSION_STRING                 = 1.0
   ENTRY_POINT                    = UefiMain
 
 [Sources]
