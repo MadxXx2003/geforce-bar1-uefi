@@ -19,6 +19,7 @@
 #include <Protocol/PciIo.h>
 #include <Protocol/PciRootBridgeIo.h>
 #include <Protocol/PciHostBridgeResourceAllocation.h>
+#include <Protocol/DriverBinding.h>
 #include <IndustryStandard/Acpi.h>
 #include <Library/UefiLib.h>
 #include <Library/UefiBootServicesTableLib.h>
@@ -578,6 +579,7 @@ PrintProtocolOwners (
   )
 {
   EFI_OPEN_PROTOCOL_INFORMATION_ENTRY *Entries;
+  EFI_DRIVER_BINDING_PROTOCOL *DriverBinding;
   UINTN EntryCount;
   UINTN Index;
   EFI_STATUS Status;
@@ -622,6 +624,31 @@ PrintProtocolOwners (
       Attributes
       );
 
+      if ((Attributes & EFI_OPEN_PROTOCOL_BY_DRIVER) != 0) {
+      DriverBinding = NULL;
+
+      Status = gBS->HandleProtocol(
+                      Entries[Index].AgentHandle,
+                      &gEfiDriverBindingProtocolGuid,
+                      (VOID **)&DriverBinding
+                      );
+
+      if (!EFI_ERROR(Status) && DriverBinding != NULL) {
+        Print(
+          L"\n        DRIVER BINDING FOUND: version=%08x "
+          L"image=%p binding-handle=%p\n",
+          DriverBinding->Version,
+          DriverBinding->ImageHandle,
+          DriverBinding->DriverBindingHandle
+          );
+      } else {
+        Print(
+          L"\n        No Driver Binding protocol on agent (%r)\n",
+          Status
+          );
+      }
+    }
+    
     if ((Attributes & EFI_OPEN_PROTOCOL_BY_DRIVER) != 0) {
       HasByDriver = TRUE;
       Print(L" BY_DRIVER");
