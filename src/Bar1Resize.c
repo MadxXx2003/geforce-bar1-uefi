@@ -15,6 +15,7 @@
 #include <Library/UefiLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/MemoryAllocationLib.h>
+#include <Protocol/DxeServices.h>
 #include <Library/DxeServicesTableLib.h>
 #include <Pi/PiDxeCis.h>
 
