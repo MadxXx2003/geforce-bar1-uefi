@@ -30,4 +30,10 @@ RunNvidiaGopPostResizeDiagnostics (
   IN CONST NVIDIA_GOP_SNAPSHOT *Snapshot
   );
 
+EFI_STATUS
+EFIAPI
+RunNvidiaGopDriverReconnect (
+  IN EFI_HANDLE ImageHandle
+  );
+
 #endif
