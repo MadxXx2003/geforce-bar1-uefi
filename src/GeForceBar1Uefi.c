@@ -2114,44 +2114,30 @@ PrintRootBridgeResourceMaps (
     }
 
     /*
-     * Final verdict for this root bridge.
+     * Final read-only audit.
+     *
+     * A mismatch here describes the firmware's published resource map.
+     * It is not a hardware-forwarding test.
      */
     Print(L"\n    === ROOT-BRIDGE RESOURCE AUDIT ===\n");
-    
-    if (TargetCoveredByRootAperture && HostAllocAttributesValid &&
-        HostMem64Decode) {
-    
-      Print(L"    ROOT-BRIDGE DESCRIPTOR: target range covered\n");
-      Print(L"    HOST BRIDGE 64-BIT DECODE: advertised\n");
-    
+
+    Print(L"    Target covered by Configuration(): %s\n",
+          TargetCoveredByRootAperture ? L"YES" : L"NO");
+
+    if (!HostAllocAttributesValid) {
+      Print(L"    Host allocation attributes: unavailable\n");
     } else {
-    
-      Print(L"    ROOT-BRIDGE DESCRIPTOR: does not describe the full target\n");
-    
-      if (!HostAllocAttributesValid) {
-        Print(L"    HOST BRIDGE ATTRIBUTES: unavailable\n");
-      } else {
-        Print(L"    HOST BRIDGE 64-BIT DECODE: %s\n",
-              HostMem64Decode ? L"advertised" : L"not advertised");
-      }
+      Print(L"    Host 64-bit memory decode: %s\n",
+            HostMem64Decode ? L"advertised" : L"not advertised");
     }
-    
+
     Print(L"\n    Linux reference aperture: 4000000000-7FFFFFFFFF\n");
     Print(L"    Linux-tested target:      41FE000000-43FFFFFFFF\n");
-    
-    Print(L"    GCD registration and root-bridge Configuration() are\n");
-    Print(L"    separate resource descriptions.\n");
-    
+
+    Print(L"    Configuration() and GCD are separate resource maps.\n");
     Print(L"    No host-bridge allocation phase was invoked.\n");
     Print(L"    No host-bridge resources were reallocated.\n");
-    Print(L"    No conclusion about physical forwarding is made here.\n");
-          Print(
-            L"    IMPORTANT: this does NOT prove live MMIO forwarding.\n"
-            L"    No target BAR-space read or write was attempted.\n"
-            );
-        }
-
-    Print(L"    No host-bridge allocation phase was invoked.\n");
+    Print(L"    Physical forwarding was not tested by this audit.\n");
 
     gBS->CloseProtocol(
            RootHandles[Index],
