@@ -66,14 +66,11 @@ jobs:
           x86_64-linux-gnu-gcc --version
 
       # Restore the latest available EDK2 source cache.
-      - name: Restore EDK2 source and BaseTools cache
-        id: edk2-cache
+      - name: Restore EDK2 bootstrap cache
         uses: actions/cache/restore@v4
         with:
           path: edk2
-          key: edk2-${{ runner.os }}-${{ runner.arch }}-bootstrap
-          restore-keys: |
-            edk2-${{ runner.os }}-${{ runner.arch }}-master-
+          key: edk2-Linux-X64-bootstrap
 
       # First-ever run: perform a normal checkout.
       - name: Checkout EDK II
@@ -164,9 +161,9 @@ jobs:
           fi
 
       # Save under the exact EDK2 revision so future runs can restore it.
-      - name: Save EDK2 source and BaseTools cache
-        if: always() && steps.edk2-revision.outputs.sha != ''
+      - name: Save EDK2 bootstrap cache
+        if: success()
         uses: actions/cache/save@v4
         with:
           path: edk2
-          key: edk2-${{ runner.os }}-${{ runner.arch }}-master-${{ steps.edk2-revision.outputs.sha }}
+          key: edk2-Linux-X64-bootstrap
