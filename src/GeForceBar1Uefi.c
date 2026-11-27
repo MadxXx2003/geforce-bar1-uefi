@@ -1533,6 +1533,7 @@ PrintNvidiaVsec (
   This is arithmetic and reporting only. It does not reserve or program
   PCI resources.
 **/
+#if 0
 STATIC
 EFI_STATUS
 ProbeNvidiaOverride8GiB (
@@ -1814,6 +1815,7 @@ ConfirmOverrideProbe (
     }
   }
 }
+#endif
 
 STATIC
 VOID
