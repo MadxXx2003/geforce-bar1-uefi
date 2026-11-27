@@ -2,9 +2,11 @@
 #include <Uefi.h>
 #include <Protocol/PciIo.h>
 #include <Protocol/GraphicsOutput.h>
+#include <Protocol/DevicePath.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiLib.h>
 #include <Library/MemoryAllocationLib.h>
+#include <Library/BaseMemoryLib.h>
 
 #include "GopDiagnostics.h"
 
@@ -45,12 +47,17 @@ OpenNvidiaGop (
 
   for (Index = 0; Index < Count; Index++) {
     EFI_GRAPHICS_OUTPUT_PROTOCOL *Candidate;
+    EFI_DEVICE_PATH_PROTOCOL *DevicePath;
+    EFI_DEVICE_PATH_PROTOCOL *Remaining;
+    EFI_HANDLE PciHandle;
     EFI_PCI_IO_PROTOCOL *PciIo;
     UINTN Segment, Bus, Device, Function;
     UINT32 Id;
 
     Candidate = NULL;
+    DevicePath = NULL;
     PciIo = NULL;
+    PciHandle = NULL;
 
     Status = gBS->OpenProtocol(
                     Handles[Index],
@@ -67,14 +74,14 @@ OpenNvidiaGop (
 
     Status = gBS->OpenProtocol(
                     Handles[Index],
-                    &gEfiPciIoProtocolGuid,
-                    (VOID **)&PciIo,
+                    &gEfiDevicePathProtocolGuid,
+                    (VOID **)&DevicePath,
                     ImageHandle,
                     NULL,
                     EFI_OPEN_PROTOCOL_GET_PROTOCOL
                     );
 
-    if (EFI_ERROR(Status) || PciIo == NULL) {
+    if (EFI_ERROR(Status) || DevicePath == NULL) {
       gBS->CloseProtocol(
              Handles[Index],
              &gEfiGraphicsOutputProtocolGuid,
@@ -84,50 +91,86 @@ OpenNvidiaGop (
       continue;
     }
 
-    Status = PciIo->GetLocation(
-                      PciIo,
-                      &Segment,
-                      &Bus,
-                      &Device,
-                      &Function
+    Remaining = DevicePath;
+
+    Status = gBS->LocateDevicePath(
+                    &gEfiPciIoProtocolGuid,
+                    &Remaining,
+                    &PciHandle
+                    );
+
+    if (!EFI_ERROR(Status) && PciHandle != NULL) {
+      Status = gBS->OpenProtocol(
+                      PciHandle,
+                      &gEfiPciIoProtocolGuid,
+                      (VOID **)&PciIo,
+                      ImageHandle,
+                      NULL,
+                      EFI_OPEN_PROTOCOL_GET_PROTOCOL
                       );
 
-    if (!EFI_ERROR(Status) &&
-        Segment == 0 &&
-        Bus == 1 &&
-        Device == 0 &&
-        Function == 0) {
-
-      Status = PciIo->Pci.Read(
+      if (!EFI_ERROR(Status) && PciIo != NULL) {
+        Status = PciIo->GetLocation(
                           PciIo,
-                          EfiPciIoWidthUint32,
-                          0,
-                          1,
-                          &Id
+                          &Segment,
+                          &Bus,
+                          &Device,
+                          &Function
                           );
 
-      if (!EFI_ERROR(Status) &&
-          (UINT16)(Id & 0xFFFF) == NVIDIA_VENDOR_ID &&
-          (UINT16)(Id >> 16) == NVIDIA_DEVICE_ID) {
+        if (!EFI_ERROR(Status) &&
+            Segment == 0 &&
+            Bus == 1 &&
+            Device == 0 &&
+            Function == 0) {
+
+          Status = PciIo->Pci.Read(
+                              PciIo,
+                              EfiPciIoWidthUint32,
+                              0,
+                              1,
+                              &Id
+                              );
+
+          if (!EFI_ERROR(Status) &&
+              (UINT16)(Id & 0xFFFF) == NVIDIA_VENDOR_ID &&
+              (UINT16)(Id >> 16) == NVIDIA_DEVICE_ID) {
+
+            gBS->CloseProtocol(
+                   PciHandle,
+                   &gEfiPciIoProtocolGuid,
+                   ImageHandle,
+                   NULL
+                   );
+
+            gBS->CloseProtocol(
+                   Handles[Index],
+                   &gEfiDevicePathProtocolGuid,
+                   ImageHandle,
+                   NULL
+                   );
+
+            *GopHandle = Handles[Index];
+            *Gop = Candidate;
+
+            FreePool(Handles);
+            return EFI_SUCCESS;
+          }
+
+        }
 
         gBS->CloseProtocol(
-               Handles[Index],
+               PciHandle,
                &gEfiPciIoProtocolGuid,
                ImageHandle,
                NULL
                );
-
-        *GopHandle = Handles[Index];
-        *Gop = Candidate;
-
-        FreePool(Handles);
-        return EFI_SUCCESS;
       }
     }
 
     gBS->CloseProtocol(
            Handles[Index],
-           &gEfiPciIoProtocolGuid,
+           &gEfiDevicePathProtocolGuid,
            ImageHandle,
            NULL
            );
