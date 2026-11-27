@@ -12,6 +12,7 @@
     - Bus-number-based parent-bridge association
     - PCI bridge-window decoding and 8-GiB comparison
     - PCIe extended-capability traversal and ReBAR/VSEC inspection
+    - Root-bridge apertures and DXE GCD memory-space descriptors
 **/
 
 #include <Uefi.h>
@@ -22,8 +23,11 @@
 #include <Library/UefiLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/MemoryAllocationLib.h>
+#include <Pi/PiDxeCis.h>
+#include <Library/DxeServicesTableLib.h>
 
 #define NVIDIA_VENDOR_ID          0x10DE
+#define NVIDIA_TARGET_DEVICE_ID   0x1F36
 
 #define PCI_CLASS_DISPLAY         0x03
 #define PCI_CLASS_BRIDGE          0x06
@@ -96,6 +100,7 @@ typedef struct {
   UINT16 DeviceId;
   UINT8 BaseClass;
   UINT8 SubClass;
+  UINT8 ProgIf;
   UINT8 HeaderType;
   UINT8 SecondaryBus;
   UINT8 SubordinateBus;
@@ -170,6 +175,7 @@ CollectPciRecords (
     Records[Index].DeviceId = (UINT16)(IdReg >> 16);
     Records[Index].BaseClass = (UINT8)(ClassReg >> 24);
     Records[Index].SubClass = (UINT8)(ClassReg >> 16);
+    Records[Index].ProgIf = (UINT8)(ClassReg >> 8);
     Records[Index].HeaderType = (UINT8)((HeaderReg >> 16) & 0x7F);
 
     if (Records[Index].HeaderType == PCI_HEADER_TYPE_BRIDGE &&
@@ -195,6 +201,180 @@ CollectPciRecords (
   Find the PCI-to-PCI bridge whose secondary bus is the endpoint's bus.
   This is a bus-number topology association, not a resource-allocation claim.
 **/
+
+
+/**
+  Locate the exact target GPU by complete PCI address and identity.
+**/
+STATIC
+PCI_DEVICE_RECORD *
+FindTargetGpuRecord (
+  IN PCI_DEVICE_RECORD *Records,
+  IN UINTN RecordCount
+  )
+{
+  UINTN Index;
+
+  for (Index = 0; Index < RecordCount; Index++) {
+    if (Records[Index].Valid &&
+        Records[Index].Segment == 0 &&
+        Records[Index].Bus == 1 &&
+        Records[Index].Device == 0 &&
+        Records[Index].Function == 0 &&
+        Records[Index].Vendor == NVIDIA_VENDOR_ID &&
+        Records[Index].DeviceId == NVIDIA_TARGET_DEVICE_ID &&
+        Records[Index].BaseClass == PCI_CLASS_DISPLAY &&
+        Records[Index].SubClass == 0x00) {
+      return &Records[Index];
+    }
+  }
+
+  return NULL;
+}
+
+/**
+  Step 3: strictly audit the target GPU's companion functions.
+
+  This routine is READ ONLY. It does not disable functions or write PCI
+  configuration space.
+**/
+STATIC
+VOID
+PrintTargetCompanionAudit (
+  IN PCI_DEVICE_RECORD *Records,
+  IN UINTN RecordCount
+  )
+{
+  PCI_DEVICE_RECORD *Gpu;
+  PCI_DEVICE_RECORD *Record;
+  UINTN Index;
+  BOOLEAN SawAudio;
+  BOOLEAN SawXhci;
+  BOOLEAN SawUcsi;
+
+  SawAudio = FALSE;
+  SawXhci = FALSE;
+  SawUcsi = FALSE;
+
+  Print(L"\n=== STEP 3: GPU COMPANION AUDIT ===\n");
+
+  Gpu = FindTargetGpuRecord(Records, RecordCount);
+
+  if (Gpu == NULL) {
+    Print(L"ERROR: exact target GPU 0000:01:00.0 10DE:1F36 not found.\n");
+    Print(L"No companion functions selected.\n");
+    Print(L"=== END STEP 3 ===\n");
+    return;
+  }
+
+  Print(L"Target GPU: %04x:%02x:%02x.%x %04x:%04x\n",
+        Gpu->Segment,
+        Gpu->Bus,
+        Gpu->Device,
+        Gpu->Function,
+        Gpu->Vendor,
+        Gpu->DeviceId);
+
+  Print(L"Scanning only the exact same segment/bus/device.\n");
+
+  for (Index = 0; Index < RecordCount; Index++) {
+    Record = &Records[Index];
+
+    if (!Record->Valid ||
+        Record->Segment != Gpu->Segment ||
+        Record->Bus != Gpu->Bus ||
+        Record->Device != Gpu->Device ||
+        Record->Function == Gpu->Function) {
+      continue;
+    }
+
+    Print(L"\n  Function %04x:%02x:%02x.%x\n",
+          Record->Segment,
+          Record->Bus,
+          Record->Device,
+          Record->Function);
+
+    Print(L"    ID:    %04x:%04x\n",
+          Record->Vendor,
+          Record->DeviceId);
+
+    Print(L"    Class: %02x:%02x:%02x\n",
+          Record->BaseClass,
+          Record->SubClass,
+          Record->ProgIf);
+
+    if (Record->Vendor != NVIDIA_VENDOR_ID) {
+      Print(L"    RESULT: non-NVIDIA same-slot function; ignored.\n");
+      continue;
+    }
+
+    /*
+     * HDMI audio function .1 is explicitly excluded.
+     */
+    if (Record->Function == 1 &&
+        Record->BaseClass == 0x04 &&
+        Record->SubClass == 0x03) {
+      SawAudio = TRUE;
+      Print(L"    RESULT: HDMI audio; NEVER a quiesce target.\n");
+      continue;
+    }
+
+    /*
+     * NVIDIA xHCI: function .2, class 0C:03:30.
+     */
+    if (Record->Function == 2) {
+      if (Record->BaseClass == PCI_CLASS_USB &&
+          Record->SubClass == 0x03 &&
+          Record->ProgIf == 0x30) {
+        SawXhci = TRUE;
+        Print(L"    RESULT: VERIFIED xHCI companion candidate.\n");
+      } else {
+        Print(L"    RESULT: function .2 class mismatch; NOT selected.\n");
+      }
+
+      continue;
+    }
+
+    /*
+     * NVIDIA UCSI: function .3, class 0C:80:00.
+     */
+    if (Record->Function == 3) {
+      if (Record->BaseClass == PCI_CLASS_USB &&
+          Record->SubClass == 0x80 &&
+          Record->ProgIf == 0x00) {
+        SawUcsi = TRUE;
+        Print(L"    RESULT: VERIFIED UCSI companion candidate.\n");
+      } else {
+        Print(L"    RESULT: function .3 class mismatch; NOT selected.\n");
+      }
+
+      continue;
+    }
+
+    Print(L"    RESULT: same-slot NVIDIA function; not selected.\n");
+  }
+
+  Print(L"\n=== STEP 3 SUMMARY ===\n");
+
+  Print(L"HDMI audio .1 observed: %s\n",
+        SawAudio ? L"YES" : L"NO");
+
+  Print(L"xHCI .2 verified:      %s\n",
+        SawXhci ? L"YES" : L"NO");
+
+  Print(L"UCSI .3 verified:       %s\n",
+        SawUcsi ? L"YES" : L"NO");
+
+  if (SawXhci && SawUcsi) {
+    Print(L"RESULT: BOTH COMPANIONS VERIFIED.\n");
+  } else {
+    Print(L"RESULT: INCOMPLETE. DO NOT QUIESCE ANY FUNCTION.\n");
+  }
+
+  Print(L"PCI configuration writes: NONE.\n");
+  Print(L"=== END STEP 3 ===\n");
+}
+
 STATIC
 PCI_DEVICE_RECORD *
 FindParentBridge (
@@ -1448,6 +1628,14 @@ PrintRootBridgeResourceMaps (
             L"    host-bridge allocation attributes: %016Lx\n",
             AllocationAttributes
             );
+          Print(
+            L"      combine MEM/PMEM windows: %s\n",
+            (AllocationAttributes & EFI_PCI_HOST_BRIDGE_COMBINE_MEM_PMEM) != 0 ? L"yes" : L"no"
+            );
+          Print(
+            L"      64-bit memory decode:     %s\n",
+            (AllocationAttributes & EFI_PCI_HOST_BRIDGE_MEM64_DECODE) != 0 ? L"yes" : L"no"
+            );
         }
         Print(L"    NOTE: protocol presence does not mean late reallocation is legal.\n");
       }
@@ -1469,6 +1657,200 @@ PrintRootBridgeResourceMaps (
 
   Print(L"=== END ROOT-BRIDGE RESOURCE MAPS ===\n");
   Print(L"NOTE: these are firmware-reported current apertures, not a free-MMIO map.\n");
+}
+
+/**
+  Return a readable name for a GCD memory-space type.
+**/
+STATIC
+CONST CHAR16 *
+GcdMemoryTypeName (
+  IN EFI_GCD_MEMORY_TYPE Type
+  )
+{
+  switch (Type) {
+    case EfiGcdMemoryTypeNonExistent:
+      return L"NonExistent";
+    case EfiGcdMemoryTypeReserved:
+      return L"Reserved";
+    case EfiGcdMemoryTypeSystemMemory:
+      return L"SystemMemory";
+    case EfiGcdMemoryTypeMemoryMappedIo:
+      return L"MemoryMappedIo";
+    case EfiGcdMemoryTypePersistent:
+      return L"Persistent";
+    case EfiGcdMemoryTypeMoreReliable:
+      return L"MoreReliable";
+    case EfiGcdMemoryTypeUnaccepted:
+      return L"Unaccepted";
+    default:
+      return L"Unknown";
+  }
+}
+
+/**
+  Determine whether a descriptor contains a target-sized, target-aligned
+  subrange. BARs must be aligned to their decoded size.
+**/
+STATIC
+BOOLEAN
+FindAlignedWindow (
+  IN UINT64 Base,
+  IN UINT64 Length,
+  IN UINT64 WindowSize,
+  OUT UINT64 *WindowBase
+  )
+{
+  UINT64 AlignedBase;
+  UINT64 Offset;
+  UINT64 MaxUint64;
+
+  if ((WindowBase == NULL) || (WindowSize == 0) ||
+      ((WindowSize & (WindowSize - 1)) != 0) || (Length < WindowSize))
+  {
+    return FALSE;
+  }
+
+  MaxUint64 = ~(UINT64)0;
+  if ((Base > (MaxUint64 - (WindowSize - 1))) ||
+      (Length - 1 > (MaxUint64 - Base)))
+  {
+    return FALSE;
+  }
+
+  AlignedBase = (Base + WindowSize - 1) & ~(WindowSize - 1);
+  if (AlignedBase < Base) {
+    return FALSE;
+  }
+
+  Offset = AlignedBase - Base;
+  if ((Offset > Length) || (WindowSize > (Length - Offset))) {
+    return FALSE;
+  }
+
+  *WindowBase = AlignedBase;
+  return TRUE;
+}
+
+/**
+  Print the DXE Global Coherency Domain (GCD) memory-space map.
+
+  This is query-only. In particular, NonExistent ranges are not assumed to
+  be usable MMIO: they are merely address ranges that no component currently
+  decodes. A free MemoryMappedIo descriptor with no ImageHandle is a stronger
+  candidate, but it still does not prove that the PCI host bridge can decode
+  or allocate the range. No GCD allocation or AddMemorySpace operation occurs.
+**/
+STATIC
+VOID
+PrintGcdMemorySpaceMap (
+  VOID
+  )
+{
+  EFI_STATUS Status;
+  UINTN DescriptorCount;
+  UINTN Index;
+  EFI_GCD_MEMORY_SPACE_DESCRIPTOR *Map;
+  EFI_GCD_MEMORY_SPACE_DESCRIPTOR *Descriptor;
+  UINT64 WindowBase;
+  UINT64 EndAddress;
+  UINT64 MaxUint64;
+  BOOLEAN HasAlignedWindow;
+  BOOLEAN PrintedAny;
+
+  Print(L"\n=== DXE GCD MEMORY-SPACE MAP (READ ONLY) ===\n");
+
+  if ((gDS == NULL) || (gDS->GetMemorySpaceMap == NULL)) {
+    Print(L"DXE Services / GetMemorySpaceMap unavailable.\n");
+    Print(L"=== END GCD MAP ===\n");
+    return;
+  }
+
+  DescriptorCount = 0;
+  Map = NULL;
+  Status = gDS->GetMemorySpaceMap(&DescriptorCount, &Map);
+  if (EFI_ERROR(Status) || (Map == NULL)) {
+    Print(L"GetMemorySpaceMap(): %r (descriptors=%u map=%p)\n",
+          Status, DescriptorCount, Map);
+    Print(L"=== END GCD MAP ===\n");
+    return;
+  }
+
+  Print(L"GCD memory descriptors: %u\n", DescriptorCount);
+  Print(L"Target window size/alignment: %016Lx bytes\n", BAR1_TARGET_BYTES);
+  MaxUint64 = ~(UINT64)0;
+  PrintedAny = FALSE;
+
+  for (Index = 0; Index < DescriptorCount; Index++) {
+    Descriptor = &Map[Index];
+
+    /* Keep the report focused on MMIO and large address-space ranges. */
+    if ((Descriptor->GcdMemoryType != EfiGcdMemoryTypeMemoryMappedIo) &&
+        (Descriptor->Length < BAR1_TARGET_BYTES))
+    {
+      continue;
+    }
+
+    PrintedAny = TRUE;
+    if ((Descriptor->Length == 0) ||
+        (Descriptor->BaseAddress > (MaxUint64 - (Descriptor->Length - 1))))
+    {
+      EndAddress = MaxUint64;
+    } else {
+      EndAddress = Descriptor->BaseAddress + Descriptor->Length - 1;
+    }
+
+    Print(
+      L"  gcd[%u]: type=%s base=%016Lx end=%016Lx length=%016Lx\n",
+      Index,
+      GcdMemoryTypeName(Descriptor->GcdMemoryType),
+      Descriptor->BaseAddress,
+      EndAddress,
+      Descriptor->Length
+      );
+    Print(
+      L"           capabilities=%016Lx attributes=%016Lx image=%p device=%p\n",
+      Descriptor->Capabilities,
+      Descriptor->Attributes,
+      Descriptor->ImageHandle,
+      Descriptor->DeviceHandle
+      );
+
+    HasAlignedWindow = FindAlignedWindow(
+                         Descriptor->BaseAddress,
+                         Descriptor->Length,
+                         BAR1_TARGET_BYTES,
+                         &WindowBase
+                         );
+    if (!HasAlignedWindow) {
+      continue;
+    }
+
+    if ((Descriptor->GcdMemoryType == EfiGcdMemoryTypeMemoryMappedIo) &&
+        (Descriptor->ImageHandle == NULL))
+    {
+      Print(
+        L"           8-GiB aligned UNALLOCATED MMIO candidate: %016Lx - %016Lx\n",
+        WindowBase,
+        WindowBase + BAR1_TARGET_BYTES - 1
+        );
+    } else if (Descriptor->GcdMemoryType == EfiGcdMemoryTypeNonExistent) {
+      Print(
+        L"           8-GiB aligned NONEXISTENT range: %016Lx - %016Lx\n",
+        WindowBase,
+        WindowBase + BAR1_TARGET_BYTES - 1
+        );
+      Print(L"           not registered as MMIO; platform decode/registration required\n");
+    }
+  }
+
+  if (!PrintedAny) {
+    Print(L"No MMIO or target-sized GCD descriptors were reported.\n");
+  }
+
+  FreePool(Map);
+  Print(L"No GCD ranges were added, allocated, freed, or modified.\n");
+  Print(L"=== END GCD MAP ===\n");
 }
 
 /**
@@ -1520,6 +1902,7 @@ UefiMain (
   Print(L"Firmware inventory only. No PCI writes, driver disconnects, or device removal.\n");
   Print(L"BAR1 target for feasibility checks: %016Lx bytes (8 GiB).\n\n", BAR1_TARGET_BYTES);
   PrintRootBridgeResourceMaps(ImageHandle);
+  PrintGcdMemorySpaceMap();
   Print(L"\n");
 
   Status = gBS->LocateHandleBuffer(
@@ -1544,6 +1927,7 @@ UefiMain (
   }
 
   CollectPciRecords(Handles, HandleCount, ImageHandle, Records);
+  PrintTargetCompanionAudit(Records, HandleCount);
 
   for (Index = 0; Index < HandleCount; Index++) {
     PciIo = NULL;

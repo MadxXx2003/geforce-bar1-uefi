@@ -1,13 +1,21 @@
 
-name: Build UEFI PCI scanner
+name: Build UEFI GCD MMIO audit
 
 on:
   workflow_dispatch:
-  push:
+  pull_request:
     branches: [ main ]
     paths:
       - 'src/**'
       - '*.inf'
+      - 'README.md'
+      - '.github/workflows/build.yml'
+  push:
+    branches: [ main, stage-2b-gcd-mmio-audit ]
+    paths:
+      - 'src/**'
+      - '*.inf'
+      - 'README.md'
       - '.github/workflows/build.yml'
 
 permissions:
@@ -21,13 +29,32 @@ jobs:
       - name: Checkout project
         uses: actions/checkout@v4
 
-      - name: Install EDK II build dependencies
+      # Install only packages not already present on the runner.
+      - name: Install missing EDK II dependencies
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential gcc g++ binutils make \
-            uuid-dev nasm acpica-tools \
+          packages=(
+            build-essential gcc g++ binutils make
+            uuid-dev nasm acpica-tools
             python3 python3-pip python3-venv git
+          )
+
+          missing=()
+
+          for pkg in "${packages[@]}"; do
+            if ! dpkg-query -W -f='${db:Status-Status}' \
+              "$pkg" 2>/dev/null | grep -qx installed; then
+              missing+=("$pkg")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Installing missing packages: ${missing[*]}"
+            sudo apt-get update
+            sudo apt-get install -y "${missing[@]}"
+          else
+            echo "All required packages are already installed."
+          fi
 
       - name: Verify compiler and tools
         run: |
@@ -38,13 +65,44 @@ jobs:
           iasl -v
           x86_64-linux-gnu-gcc --version
 
+      # Restore the latest available EDK2 source cache.
+      - name: Restore EDK2 source and BaseTools cache
+        id: edk2-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: edk2
+          key: edk2-${{ runner.os }}-${{ runner.arch }}-bootstrap
+          restore-keys: |
+            edk2-${{ runner.os }}-${{ runner.arch }}-master-
+
+      # First-ever run: perform a normal checkout.
       - name: Checkout EDK II
+        if: steps.edk2-cache.outputs.cache-matched-key == ''
         uses: actions/checkout@v4
         with:
           repository: tianocore/edk2
           ref: master
           path: edk2
           submodules: recursive
+          fetch-depth: 1
+
+      # Subsequent runs: update the cached clone instead of cloning again.
+      - name: Refresh cached EDK II checkout
+        if: steps.edk2-cache.outputs.cache-matched-key != ''
+        working-directory: edk2
+        run: |
+          git fetch --depth=1 origin master
+          git checkout --detach FETCH_HEAD
+
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1
+
+      - name: Record EDK2 revision
+        id: edk2-revision
+        run: |
+          SHA="$(git -C edk2 rev-parse HEAD)"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Using EDK2 revision: $SHA"
 
       - name: Stage application in EDK II workspace
         run: |
@@ -64,7 +122,9 @@ jobs:
       - name: Build EDK II BaseTools and application
         working-directory: edk2
         run: |
+          # Cached BaseTools binaries are reused where possible.
           make -C BaseTools
+
           source edksetup.sh
 
           echo "=== Available GCC toolchain definitions ==="
@@ -88,6 +148,25 @@ jobs:
       - name: Upload EFI scanner
         uses: actions/upload-artifact@v4
         with:
-          name: GeForceBar1Uefi-readonly-x64
+          name: GeForceBar1Uefi-gcd-mmio-audit-x64
           path: dist/
           if-no-files-found: error
+
+      # Remove temporary project modifications and build products.
+      # Keep EDK2 source, submodules and compiled BaseTools.
+      - name: Prepare EDK2 cache
+        if: always()
+        run: |
+          if [ -d edk2/.git ]; then
+            git -C edk2 checkout -- MdeModulePkg/MdeModulePkg.dsc || true
+            rm -rf edk2/GeForceBar1Uefi
+            rm -rf edk2/Build
+          fi
+
+      # Save under the exact EDK2 revision so future runs can restore it.
+      - name: Save EDK2 source and BaseTools cache
+        if: always() && steps.edk2-revision.outputs.sha != ''
+        uses: actions/cache/save@v4
+        with:
+          path: edk2
+          key: edk2-${{ runner.os }}-${{ runner.arch }}-master-${{ steps.edk2-revision.outputs.sha }}
