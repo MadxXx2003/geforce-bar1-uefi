@@ -10,19 +10,56 @@
 #include <Library/BaseMemoryLib.h>
 
 #include "GopDiagnostics.h"
+#include "Bar1Log.h"
 
 #define NVIDIA_VENDOR_ID  0x10DE
 #define NVIDIA_DEVICE_ID  0x1F36
 #define GOP_TEST_WIDTH    8
 #define GOP_TEST_HEIGHT   8
 
-/*
- * Machine-specific BAR1 locations established by the Linux-tested layout.
- * The old framebuffer base was observed as 0xA0000000 before resizing.
- */
 #define NVIDIA_OLD_BAR1_BASE     0xA0000000ULL
 #define NVIDIA_NEW_BAR1_BASE     0x4200000000ULL
 #define NVIDIA_NEW_BAR1_SIZE     0x200000000ULL
+
+#define NVIDIA_GPU_BUS          1
+#define NVIDIA_GPU_DEVICE       0
+#define NVIDIA_GPU_FUNCTION     0
+
+#define NVIDIA_ROOT_BUS         0
+#define NVIDIA_ROOT_DEVICE      1
+#define NVIDIA_ROOT_FUNCTION    0
+
+#define NVIDIA_GPU_BAR0         0x10
+#define NVIDIA_GPU_BAR1_LOW     0x14
+#define NVIDIA_GPU_BAR1_HIGH    0x18
+#define NVIDIA_GPU_BAR3_LOW     0x1C
+#define NVIDIA_GPU_BAR3_HIGH    0x20
+#define NVIDIA_GPU_BAR5         0x24
+
+#define NVIDIA_GPU_VSEC_610     0x610
+#define NVIDIA_GPU_REBAR_CTRL   0xBC0
+
+#define NVIDIA_ROOT_PREF_LOW    0x24
+#define NVIDIA_ROOT_PREF_BASE   0x28
+#define NVIDIA_ROOT_PREF_LIMIT  0x2C
+
+typedef struct {
+  UINT32 Bar0;
+  UINT32 Bar1Low;
+  UINT32 Bar1High;
+  UINT32 Bar3Low;
+  UINT32 Bar3High;
+  UINT32 Bar5;
+  UINT32 Vsec610;
+  UINT32 RebarControl;
+
+  UINT32 RootPrefLow;
+  UINT32 RootPrefBase;
+  UINT32 RootPrefLimit;
+
+  BOOLEAN GpuValid;
+  BOOLEAN RootValid;
+} NVIDIA_PCI_STATE;
 
 STATIC
 VOID
@@ -64,11 +101,9 @@ ReportNvidiaGopFramebuffer (
 
   if (FbBase >= NVIDIA_NEW_BAR1_BASE && FbEnd <= Bar1End) {
     Print(L"GOP %s: framebuffer is inside the new 8-GiB BAR1 range\n", When);
-
   } else if (FbBase == NVIDIA_OLD_BAR1_BASE) {
     Print(L"GOP %s: STALE OLD BAR1 BASE — GOP has not remapped its framebuffer\n",
           When);
-
   } else {
     Print(L"GOP %s: framebuffer is outside the new BAR1 range\n", When);
   }
@@ -87,10 +122,16 @@ OpenNvidiaGop (
   UINTN Count;
   UINTN Index;
 
+  if (GopHandle == NULL || Gop == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+
   *GopHandle = NULL;
   *Gop = NULL;
   Handles = NULL;
   Count = 0;
+
+  Bar1LogEvent(L"GOP lookup: ENTER LocateHandleBuffer(GOP)");
 
   Status = gBS->LocateHandleBuffer(
                   ByProtocol,
@@ -99,6 +140,8 @@ OpenNvidiaGop (
                   &Count,
                   &Handles
                   );
+
+  Bar1LogStatus(L"GOP lookup: LocateHandleBuffer(GOP)", Status);
 
   if (EFI_ERROR(Status)) {
     return Status;
@@ -118,6 +161,8 @@ OpenNvidiaGop (
     PciIo = NULL;
     PciHandle = NULL;
 
+    Bar1LogEvent(L"GOP lookup: ENTER OpenProtocol(GOP)");
+
     Status = gBS->OpenProtocol(
                     Handles[Index],
                     &gEfiGraphicsOutputProtocolGuid,
@@ -127,9 +172,13 @@ OpenNvidiaGop (
                     EFI_OPEN_PROTOCOL_GET_PROTOCOL
                     );
 
+    Bar1LogStatus(L"GOP lookup: OpenProtocol(GOP)", Status);
+
     if (EFI_ERROR(Status) || Candidate == NULL) {
       continue;
     }
+
+    Bar1LogEvent(L"GOP lookup: ENTER OpenProtocol(DevicePath)");
 
     Status = gBS->OpenProtocol(
                     Handles[Index],
@@ -139,6 +188,8 @@ OpenNvidiaGop (
                     NULL,
                     EFI_OPEN_PROTOCOL_GET_PROTOCOL
                     );
+
+    Bar1LogStatus(L"GOP lookup: OpenProtocol(DevicePath)", Status);
 
     if (EFI_ERROR(Status) || DevicePath == NULL) {
       gBS->CloseProtocol(
@@ -152,13 +203,19 @@ OpenNvidiaGop (
 
     Remaining = DevicePath;
 
+    Bar1LogEvent(L"GOP lookup: ENTER LocateDevicePath(PCI_IO)");
+
     Status = gBS->LocateDevicePath(
                     &gEfiPciIoProtocolGuid,
                     &Remaining,
                     &PciHandle
                     );
 
+    Bar1LogStatus(L"GOP lookup: LocateDevicePath(PCI_IO)", Status);
+
     if (!EFI_ERROR(Status) && PciHandle != NULL) {
+      Bar1LogEvent(L"GOP lookup: ENTER OpenProtocol(PCI_IO)");
+
       Status = gBS->OpenProtocol(
                       PciHandle,
                       &gEfiPciIoProtocolGuid,
@@ -168,7 +225,11 @@ OpenNvidiaGop (
                       EFI_OPEN_PROTOCOL_GET_PROTOCOL
                       );
 
+      Bar1LogStatus(L"GOP lookup: OpenProtocol(PCI_IO)", Status);
+
       if (!EFI_ERROR(Status) && PciIo != NULL) {
+        Bar1LogEvent(L"GOP lookup: ENTER PCI_IO.GetLocation");
+
         Status = PciIo->GetLocation(
                           PciIo,
                           &Segment,
@@ -177,11 +238,15 @@ OpenNvidiaGop (
                           &Function
                           );
 
+        Bar1LogStatus(L"GOP lookup: PCI_IO.GetLocation", Status);
+
         if (!EFI_ERROR(Status) &&
             Segment == 0 &&
             Bus == 1 &&
             Device == 0 &&
             Function == 0) {
+
+          Bar1LogEvent(L"GOP lookup: ENTER PCI config ID read");
 
           Status = PciIo->Pci.Read(
                               PciIo,
@@ -191,9 +256,13 @@ OpenNvidiaGop (
                               &Id
                               );
 
+          Bar1LogStatus(L"GOP lookup: PCI config ID read", Status);
+
           if (!EFI_ERROR(Status) &&
               (UINT16)(Id & 0xFFFF) == NVIDIA_VENDOR_ID &&
               (UINT16)(Id >> 16) == NVIDIA_DEVICE_ID) {
+
+            Bar1LogEvent(L"GOP lookup: matched NVIDIA 10DE:1F36");
 
             gBS->CloseProtocol(
                    PciHandle,
@@ -215,7 +284,6 @@ OpenNvidiaGop (
             FreePool(Handles);
             return EFI_SUCCESS;
           }
-
         }
 
         gBS->CloseProtocol(
@@ -243,6 +311,7 @@ OpenNvidiaGop (
   }
 
   FreePool(Handles);
+  Bar1LogEvent(L"GOP lookup: no matching NVIDIA GOP found");
   return EFI_NOT_FOUND;
 }
 
@@ -285,8 +354,11 @@ GopBltRoundTrip (
 
   Pixels = AllocatePool(BufferBytes);
   if (Pixels == NULL) {
+    Bar1LogEvent(L"GOP Blt: AllocatePool FAILED");
     return EFI_OUT_OF_RESOURCES;
   }
+
+  Bar1LogEvent(L"GOP Blt: ENTER VideoToBltBuffer");
 
   *ReadStatus = Gop->Blt(
                        Gop,
@@ -300,7 +372,11 @@ GopBltRoundTrip (
                          sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL)
                        );
 
+  Bar1LogStatus(L"GOP Blt: VideoToBltBuffer", *ReadStatus);
+
   if (!EFI_ERROR(*ReadStatus)) {
+    Bar1LogEvent(L"GOP Blt: ENTER BltBufferToVideo");
+
     *WriteStatus = Gop->Blt(
                          Gop,
                          Pixels,
@@ -312,12 +388,17 @@ GopBltRoundTrip (
                          GOP_TEST_WIDTH *
                            sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL)
                          );
+
+    Bar1LogStatus(L"GOP Blt: BltBufferToVideo", *WriteStatus);
   }
 
   Result = EFI_ERROR(*ReadStatus) ?
            *ReadStatus : *WriteStatus;
 
+  Bar1LogEvent(L"GOP Blt: ENTER FreePool");
   FreePool(Pixels);
+  Bar1LogEvent(L"GOP Blt: FreePool completed");
+
   return Result;
 }
 
@@ -338,7 +419,12 @@ CaptureNvidiaGop (
 
   SetMem(Snapshot, sizeof(*Snapshot), 0);
 
+  Bar1LogEvent(L"GOP capture: ENTER OpenNvidiaGop");
+
   Status = OpenNvidiaGop(ImageHandle, &Handle, &Gop);
+
+  Bar1LogStatus(L"GOP capture: OpenNvidiaGop", Status);
+
   if (EFI_ERROR(Status)) {
     Print(L"GOP pre: NVIDIA GOP not found (%r)\n", Status);
     return Status;
@@ -390,7 +476,12 @@ RunNvidiaGopPostResizeDiagnostics (
   EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop;
   BOOLEAN SameHandle;
 
+  Bar1LogEvent(L"GOP diagnostics: ENTER OpenNvidiaGop");
+
   Status = OpenNvidiaGop(ImageHandle, &Handle, &Gop);
+
+  Bar1LogStatus(L"GOP diagnostics: OpenNvidiaGop", Status);
+
   if (EFI_ERROR(Status)) {
     Print(L"GOP post: NVIDIA GOP unavailable (%r)\n", Status);
     return;
@@ -418,11 +509,11 @@ RunNvidiaGopPostResizeDiagnostics (
     Gop->Mode->FrameBufferSize
     );
 
-  Status = GopBltRoundTrip(
-             Gop,
-             &ReadBefore,
-             &WriteBefore
-             );
+  Bar1LogEvent(L"GOP diagnostics: ENTER first Blt round trip");
+
+  Status = GopBltRoundTrip(Gop, &ReadBefore, &WriteBefore);
+
+  Bar1LogStatus(L"GOP diagnostics: first Blt round trip", Status);
 
   Print(
     L"GOP Blt before SetMode: read=%r write=%r result=%r\n",
@@ -439,21 +530,23 @@ RunNvidiaGopPostResizeDiagnostics (
 
   } else if (!SameHandle) {
 
-    // Do not apply a saved mode index to a different GOP instance.
     SetModeStatus = EFI_ABORTED;
 
   } else {
 
-    SetModeStatus =
-      Gop->SetMode(Gop, Snapshot->ModeNumber);
+    Bar1LogEvent(L"GOP diagnostics: ENTER SetMode(saved mode)");
+
+    SetModeStatus = Gop->SetMode(Gop, Snapshot->ModeNumber);
+
+    Bar1LogStatus(L"GOP diagnostics: SetMode(saved mode)", SetModeStatus);
   }
-  
+
   ReportNvidiaGopFramebuffer(L"before SetMode", Gop);
-  
+
   if (!EFI_ERROR(SetModeStatus)) {
     ReportNvidiaGopFramebuffer(L"after SetMode", Gop);
   }
-  
+
   Print(
     L"GOP SetMode(saved=%u): %r\n",
     (Snapshot != NULL && Snapshot->Valid) ?
@@ -461,11 +554,11 @@ RunNvidiaGopPostResizeDiagnostics (
     SetModeStatus
     );
 
-  Status = GopBltRoundTrip(
-             Gop,
-             &ReadAfter,
-             &WriteAfter
-             );
+  Bar1LogEvent(L"GOP diagnostics: ENTER second Blt round trip");
+
+  Status = GopBltRoundTrip(Gop, &ReadAfter, &WriteAfter);
+
+  Bar1LogStatus(L"GOP diagnostics: second Blt round trip", Status);
 
   Print(
     L"GOP Blt after SetMode: read=%r write=%r result=%r\n",
@@ -474,54 +567,10 @@ RunNvidiaGopPostResizeDiagnostics (
     Status
     );
 
+  Bar1LogEvent(L"GOP diagnostics: ENTER CloseNvidiaGop");
   CloseNvidiaGop(ImageHandle, Handle);
+  Bar1LogEvent(L"GOP diagnostics: completed");
 }
-
-//
-// Experimental NVIDIA GOP driver reconnect.
-//
-// This does not resize BARs, reset the GPU, or modify PCI configuration.
-// It disconnects and reconnects only the driver owning the target GPU.
-//
-#define NVIDIA_GPU_BUS          1
-#define NVIDIA_GPU_DEVICE       0
-#define NVIDIA_GPU_FUNCTION     0
-
-#define NVIDIA_ROOT_BUS         0
-#define NVIDIA_ROOT_DEVICE      1
-#define NVIDIA_ROOT_FUNCTION    0
-
-#define NVIDIA_GPU_BAR0         0x10
-#define NVIDIA_GPU_BAR1_LOW     0x14
-#define NVIDIA_GPU_BAR1_HIGH    0x18
-#define NVIDIA_GPU_BAR3_LOW     0x1C
-#define NVIDIA_GPU_BAR3_HIGH    0x20
-#define NVIDIA_GPU_BAR5         0x24
-
-#define NVIDIA_GPU_VSEC_610     0x610
-#define NVIDIA_GPU_REBAR_CTRL   0xBC0
-
-#define NVIDIA_ROOT_PREF_LOW    0x24
-#define NVIDIA_ROOT_PREF_BASE   0x28
-#define NVIDIA_ROOT_PREF_LIMIT  0x2C
-
-typedef struct {
-  UINT32 Bar0;
-  UINT32 Bar1Low;
-  UINT32 Bar1High;
-  UINT32 Bar3Low;
-  UINT32 Bar3High;
-  UINT32 Bar5;
-  UINT32 Vsec610;
-  UINT32 RebarControl;
-
-  UINT32 RootPrefLow;
-  UINT32 RootPrefBase;
-  UINT32 RootPrefLimit;
-
-  BOOLEAN GpuValid;
-  BOOLEAN RootValid;
-} NVIDIA_PCI_STATE;
 
 STATIC
 EFI_STATUS
@@ -555,6 +604,8 @@ FindPciController (
   Handles = NULL;
   Count = 0;
 
+  Bar1LogEvent(L"PCI search: ENTER LocateHandleBuffer");
+
   Status = gBS->LocateHandleBuffer(
                   ByProtocol,
                   &gEfiPciIoProtocolGuid,
@@ -563,12 +614,16 @@ FindPciController (
                   &Handles
                   );
 
+  Bar1LogStatus(L"PCI search: LocateHandleBuffer", Status);
+
   if (EFI_ERROR(Status)) {
     return Status;
   }
 
   for (Index = 0; Index < Count; Index++) {
     PciIo = NULL;
+
+    Bar1LogEvent(L"PCI search: ENTER OpenProtocol");
 
     Status = gBS->OpenProtocol(
                     Handles[Index],
@@ -579,9 +634,13 @@ FindPciController (
                     EFI_OPEN_PROTOCOL_GET_PROTOCOL
                     );
 
+    Bar1LogStatus(L"PCI search: OpenProtocol", Status);
+
     if (EFI_ERROR(Status) || PciIo == NULL) {
       continue;
     }
+
+    Bar1LogEvent(L"PCI search: ENTER GetLocation");
 
     Status = PciIo->GetLocation(
                       PciIo,
@@ -591,11 +650,15 @@ FindPciController (
                       &Function
                       );
 
+    Bar1LogStatus(L"PCI search: GetLocation", Status);
+
     if (!EFI_ERROR(Status) &&
         Segment == WantedSegment &&
         Bus == WantedBus &&
         Device == WantedDevice &&
         Function == WantedFunction) {
+
+      Bar1LogEvent(L"PCI search: ENTER config ID read");
 
       Status = PciIo->Pci.Read(
                           PciIo,
@@ -604,6 +667,8 @@ FindPciController (
                           1,
                           &Id
                           );
+
+      Bar1LogStatus(L"PCI search: config ID read", Status);
 
       if (!EFI_ERROR(Status) &&
           (UINT16)(Id & 0xFFFF) == WantedVendor &&
@@ -658,12 +723,16 @@ FindNvidiaDriverImage (
   EntryCount = 0;
   DriverAgent = NULL;
 
+  Bar1LogEvent(L"Driver lookup: ENTER OpenProtocolInformation");
+
   Status = gBS->OpenProtocolInformation(
                   GpuHandle,
                   &gEfiPciIoProtocolGuid,
                   &Entries,
                   &EntryCount
                   );
+
+  Bar1LogStatus(L"Driver lookup: OpenProtocolInformation", Status);
 
   if (EFI_ERROR(Status)) {
     Print(L"GOP recovery: OpenProtocolInformation failed: %r\n",
@@ -679,11 +748,11 @@ FindNvidiaDriverImage (
 
     if (DriverAgent != NULL) {
       Print(L"GOP recovery: multiple BY_DRIVER owners found.\n");
+
       for (Index = 0; Index < EntryCount; Index++) {
         if (Entries[Index].AgentHandle == DriverAgent &&
             (Entries[Index].Attributes &
              EFI_OPEN_PROTOCOL_BY_CHILD_CONTROLLER) != 0) {
-      
           Print(
             L"  NVIDIA driver child controller: %p (opens=%u)\n",
             Entries[Index].ControllerHandle,
@@ -691,9 +760,8 @@ FindNvidiaDriverImage (
             );
         }
       }
-      if (Entries != NULL) {
-        FreePool(Entries);
-      }
+
+      FreePool(Entries);
       return EFI_ACCESS_DENIED;
     }
 
@@ -709,11 +777,15 @@ FindNvidiaDriverImage (
 
   Binding = NULL;
 
+  Bar1LogEvent(L"Driver lookup: ENTER HandleProtocol(DriverBinding)");
+
   Status = gBS->HandleProtocol(
                   DriverAgent,
                   &gEfiDriverBindingProtocolGuid,
                   (VOID **)&Binding
                   );
+
+  Bar1LogStatus(L"Driver lookup: HandleProtocol(DriverBinding)", Status);
 
   if (EFI_ERROR(Status) || Binding == NULL) {
     Print(L"GOP recovery: cannot retrieve Driver Binding: %r\n",
@@ -755,6 +827,8 @@ ReadPciDword (
 
   PciIo = NULL;
 
+  Bar1LogEvent(L"PCI snapshot: ENTER OpenProtocol");
+
   Status = gBS->OpenProtocol(
                   ControllerHandle,
                   &gEfiPciIoProtocolGuid,
@@ -764,9 +838,13 @@ ReadPciDword (
                   EFI_OPEN_PROTOCOL_GET_PROTOCOL
                   );
 
+  Bar1LogStatus(L"PCI snapshot: OpenProtocol", Status);
+
   if (EFI_ERROR(Status)) {
     return Status;
   }
+
+  Bar1LogEvent(L"PCI snapshot: ENTER config read");
 
   Status = PciIo->Pci.Read(
                       PciIo,
@@ -775,6 +853,8 @@ ReadPciDword (
                       1,
                       Value
                       );
+
+  Bar1LogStatus(L"PCI snapshot: config read", Status);
 
   gBS->CloseProtocol(
          ControllerHandle,
@@ -803,6 +883,8 @@ CaptureNvidiaPciState (
 
   SetMem(State, sizeof(*State), 0);
 
+  Bar1LogEvent(L"PCI snapshot: ENTER GPU controller search");
+
   Status = FindPciController(
              ImageHandle,
              0,
@@ -814,12 +896,15 @@ CaptureNvidiaPciState (
              &GpuHandle
              );
 
+  Bar1LogStatus(L"PCI snapshot: GPU controller search", Status);
+
   if (EFI_ERROR(Status)) {
     return Status;
   }
 
 #define READ_GPU_FIELD(Field, Offset)                    \
   do {                                                   \
+    Print(L"PCI snapshot: reading offset %03x\n", Offset); \
     Status = ReadPciDword(ImageHandle, GpuHandle,        \
                           Offset, &State->Field);        \
     if (EFI_ERROR(Status)) {                             \
@@ -842,6 +927,8 @@ CaptureNvidiaPciState (
 
   State->GpuValid = TRUE;
 
+  Bar1LogEvent(L"PCI snapshot: ENTER root-port search");
+
   Status = FindPciController(
              ImageHandle,
              0,
@@ -852,6 +939,8 @@ CaptureNvidiaPciState (
              0x1901,
              &RootHandle
              );
+
+  Bar1LogStatus(L"PCI snapshot: root-port search", Status);
 
   if (!EFI_ERROR(Status)) {
     if (!EFI_ERROR(ReadPciDword(
@@ -971,16 +1060,25 @@ PrintHandleProtocols (
   UINTN Count;
   UINTN Index;
 
+  if (Handle == NULL) {
+    Bar1LogEvent(L"Protocol inventory: skipped NULL handle");
+    return;
+  }
+
   ProtocolGuids = NULL;
   Count = 0;
 
   Print(L"\nProtocols on %s handle %p:\n", Label, Handle);
+
+  Bar1LogEvent(L"Protocol inventory: ENTER ProtocolsPerHandle");
 
   Status = gBS->ProtocolsPerHandle(
                   Handle,
                   &ProtocolGuids,
                   &Count
                   );
+
+  Bar1LogStatus(L"Protocol inventory: ProtocolsPerHandle", Status);
 
   if (EFI_ERROR(Status)) {
     Print(L"  Protocol enumeration failed: %r\n", Status);
@@ -1005,9 +1103,13 @@ PrintHandleProtocols (
     }
   }
 
+  Bar1LogEvent(L"Protocol inventory: ENTER FreePool");
+
   if (ProtocolGuids != NULL) {
     FreePool(ProtocolGuids);
   }
+
+  Bar1LogEvent(L"Protocol inventory: completed");
 }
 
 EFI_STATUS
@@ -1031,14 +1133,21 @@ RunNvidiaGopDriverReconnect (
   NVIDIA_PCI_STATE Before;
   NVIDIA_PCI_STATE After;
 
+  GpuHandle = NULL;
+  DriverImageHandle = NULL;
+  OldGopHandle = NULL;
+  NewGopHandle = NULL;
+  Gop = NULL;
+
+  Bar1LogEvent(L"Reconnect: ENTER RunNvidiaGopDriverReconnect");
+
   Print(L"\n");
   Print(L"===============================================\n");
   Print(L" EXPERIMENTAL NVIDIA GOP DRIVER RECONNECT\n");
   Print(L"===============================================\n");
 
-  //
-  // Find the exact NVIDIA GPU.
-  //
+  Bar1LogEvent(L"Reconnect: ENTER FindPciController(GPU)");
+
   Status = FindPciController(
              ImageHandle,
              0,
@@ -1049,45 +1158,48 @@ RunNvidiaGopDriverReconnect (
              NVIDIA_DEVICE_ID,
              &GpuHandle
              );
-  PrintHandleProtocols(L"NVIDIA GPU", GpuHandle);
 
-  if (EFI_ERROR(Status)) {
+  Bar1LogStatus(L"Reconnect: FindPciController(GPU)", Status);
+
+  if (EFI_ERROR(Status) || GpuHandle == NULL) {
     Print(L"GOP recovery: target GPU not found: %r\n", Status);
-    return Status;
+    return EFI_ERROR(Status) ? Status : EFI_NOT_FOUND;
   }
 
-  //
-  // Find its actual BY_DRIVER owner and driver image.
-  //
+  Bar1LogEvent(L"Reconnect: ENTER PrintHandleProtocols(GPU)");
+  PrintHandleProtocols(L"NVIDIA GPU", GpuHandle);
+  Bar1LogEvent(L"Reconnect: completed PrintHandleProtocols(GPU)");
+
+  Bar1LogEvent(L"Reconnect: ENTER FindNvidiaDriverImage");
+
   Status = FindNvidiaDriverImage(
              GpuHandle,
              &DriverImageHandle
              );
 
-  if (EFI_ERROR(Status)) {
-    Print(L"GOP recovery: driver identification failed: %r\n",
-          Status);
-    return Status;
+  Bar1LogStatus(L"Reconnect: FindNvidiaDriverImage", Status);
+
+  if (EFI_ERROR(Status) || DriverImageHandle == NULL) {
+    Print(L"GOP recovery: driver identification failed: %r\n", Status);
+    return EFI_ERROR(Status) ? Status : EFI_NOT_FOUND;
   }
 
-  //
-  // Capture the known-good resized PCI configuration.
-  //
+  Bar1LogEvent(L"Reconnect: ENTER CaptureNvidiaPciState(BEFORE)");
+
   Status = CaptureNvidiaPciState(ImageHandle, &Before);
 
+  Bar1LogStatus(L"Reconnect: CaptureNvidiaPciState(BEFORE)", Status);
+
   if (EFI_ERROR(Status)) {
-    Print(L"GOP recovery: initial PCI snapshot failed: %r\n",
-          Status);
+    Print(L"GOP recovery: initial PCI snapshot failed: %r\n", Status);
     return Status;
   }
 
+  Bar1LogEvent(L"Reconnect: ENTER PrintNvidiaPciState(BEFORE)");
   PrintNvidiaPciState(L"BEFORE DISCONNECT", &Before);
+  Bar1LogEvent(L"Reconnect: completed PrintNvidiaPciState(BEFORE)");
 
-  //
-  // Record the current GOP handle and framebuffer.
-  //
-  OldGopHandle = NULL;
-  Gop = NULL;
+  Bar1LogEvent(L"Reconnect: ENTER OpenNvidiaGop(OLD)");
 
   GopStatus = OpenNvidiaGop(
                 ImageHandle,
@@ -1095,26 +1207,39 @@ RunNvidiaGopDriverReconnect (
                 &Gop
                 );
 
-  PrintHandleProtocols(L"Original NVIDIA GOP", OldGopHandle);
-  if (!EFI_ERROR(GopStatus)) {
+  Bar1LogStatus(L"Reconnect: OpenNvidiaGop(OLD)", GopStatus);
+
+  if (!EFI_ERROR(GopStatus) && OldGopHandle != NULL && Gop != NULL) {
+    Bar1LogEvent(L"Reconnect: ENTER PrintHandleProtocols(OLD GOP)");
+    PrintHandleProtocols(L"Original NVIDIA GOP", OldGopHandle);
+    Bar1LogEvent(L"Reconnect: completed PrintHandleProtocols(OLD GOP)");
+
     Print(L"Old GOP handle: %p\n", OldGopHandle);
     ReportNvidiaGopFramebuffer(L"before driver disconnect", Gop);
+
+    Bar1LogEvent(L"Reconnect: ENTER CloseNvidiaGop(OLD)");
     CloseNvidiaGop(ImageHandle, OldGopHandle);
+    Bar1LogEvent(L"Reconnect: completed CloseNvidiaGop(OLD)");
+
+    Gop = NULL;
   } else {
     Print(L"Old GOP could not be opened: %r\n", GopStatus);
   }
 
-  //
-  // Disconnect only the identified NVIDIA driver from this GPU.
-  // Child controllers created by this driver may also be disconnected.
-  //
   Print(L"\nDisconnecting NVIDIA driver...\n");
+
+  Bar1LogEvent(L"Reconnect: ENTER DisconnectController(GPU)");
 
   DisconnectStatus = gBS->DisconnectController(
                            GpuHandle,
                            DriverImageHandle,
                            NULL
                            );
+
+  Bar1LogStatus(
+    L"Reconnect: DisconnectController(GPU)",
+    DisconnectStatus
+    );
 
   Print(L"DisconnectController: %r\n", DisconnectStatus);
 
@@ -1123,10 +1248,9 @@ RunNvidiaGopDriverReconnect (
     return DisconnectStatus;
   }
 
-  //
-  // Reconnect only the same NVIDIA driver.
-  //
   Print(L"\nReconnecting NVIDIA driver...\n");
+
+  Bar1LogEvent(L"Reconnect: ENTER ConnectController(GPU)");
 
   ConnectStatus = gBS->ConnectController(
                         GpuHandle,
@@ -1135,37 +1259,48 @@ RunNvidiaGopDriverReconnect (
                         TRUE
                         );
 
+  Bar1LogStatus(
+    L"Reconnect: ConnectController(GPU)",
+    ConnectStatus
+    );
+
   Print(L"ConnectController: %r\n", ConnectStatus);
 
-  //
-  // Inspect PCI state even if ConnectController returned an error.
-  //
+  Bar1LogEvent(L"Reconnect: ENTER CaptureNvidiaPciState(AFTER)");
+
   Status = CaptureNvidiaPciState(ImageHandle, &After);
+
+  Bar1LogStatus(L"Reconnect: CaptureNvidiaPciState(AFTER)", Status);
 
   if (EFI_ERROR(Status)) {
     Print(L"Post-reconnect PCI snapshot failed: %r\n", Status);
   } else {
+    Bar1LogEvent(L"Reconnect: ENTER PrintNvidiaPciState(AFTER)");
     PrintNvidiaPciState(L"AFTER RECONNECT", &After);
+
+    Bar1LogEvent(L"Reconnect: ENTER CompareNvidiaPciStates");
     CompareNvidiaPciStates(&Before, &After);
+    Bar1LogEvent(L"Reconnect: completed PCI state comparison");
   }
 
-  //
-  // Find the GOP again. It may have a different handle.
-  //
-  NewGopHandle = NULL;
-  Gop = NULL;
+  Bar1LogEvent(L"Reconnect: ENTER OpenNvidiaGop(NEW)");
 
   GopStatus = OpenNvidiaGop(
                 ImageHandle,
                 &NewGopHandle,
                 &Gop
                 );
-  
-  PrintHandleProtocols(L"Reconnected NVIDIA GOP", NewGopHandle);
-  
-  if (EFI_ERROR(GopStatus)) {
-    Print(L"\nNew NVIDIA GOP not found: %r\n", GopStatus);
-  } else {
+
+  Bar1LogStatus(L"Reconnect: OpenNvidiaGop(NEW)", GopStatus);
+
+  if (!EFI_ERROR(GopStatus) &&
+      NewGopHandle != NULL &&
+      Gop != NULL) {
+
+    Bar1LogEvent(L"Reconnect: ENTER PrintHandleProtocols(NEW GOP)");
+    PrintHandleProtocols(L"Reconnected NVIDIA GOP", NewGopHandle);
+    Bar1LogEvent(L"Reconnect: completed PrintHandleProtocols(NEW GOP)");
+
     Print(L"\nNew GOP handle: %p\n", NewGopHandle);
     Print(L"GOP handle: %s\n",
           NewGopHandle == OldGopHandle ?
@@ -1173,7 +1308,13 @@ RunNvidiaGopDriverReconnect (
 
     ReportNvidiaGopFramebuffer(L"after driver reconnect", Gop);
 
+    Bar1LogEvent(L"Reconnect: ENTER CloseNvidiaGop(NEW)");
     CloseNvidiaGop(ImageHandle, NewGopHandle);
+    Bar1LogEvent(L"Reconnect: completed CloseNvidiaGop(NEW)");
+
+    Gop = NULL;
+  } else {
+    Print(L"\nNew NVIDIA GOP not found: %r\n", GopStatus);
   }
 
   Print(L"\n=== NVIDIA GOP RECONNECT RESULT ===\n");
@@ -1181,6 +1322,8 @@ RunNvidiaGopDriverReconnect (
   Print(L"Reconnect:  %r\n", ConnectStatus);
   Print(L"GOP lookup: %r\n", GopStatus);
   Print(L"=== END GOP RECONNECT RESULT ===\n");
+
+  Bar1LogEvent(L"Reconnect: completed RunNvidiaGopDriverReconnect");
 
   if (EFI_ERROR(ConnectStatus)) {
     return ConnectStatus;
