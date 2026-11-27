@@ -156,5 +156,6 @@ BootWindows(
     if (Handles != NULL) {
       FreePool(Handles);
     }
+  }
   return EFI_NOT_FOUND;
 }
