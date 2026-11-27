@@ -2751,3 +2751,4 @@ PostResizeDiagnostics:
   }
   
   return EFI_SUCCESS;
+}
