@@ -36,4 +36,4 @@ Its development was informed by the following projects and research:
 
 These projects are acknowledged as technical references and inspiration. This project does not claim ownership of their work or imply endorsement by their authors.
 
-still if any of the above wish it off the internet send me a git pull request because i never read my emails
+still if any of the above wish it off the internet send me a git issue because i never read my emails
