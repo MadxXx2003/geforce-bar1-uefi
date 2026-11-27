@@ -49,6 +49,10 @@
  * Leave at 0 for the compact targeted dump.
  */
 #define DUMP_FULL_EXT_CONFIG 0
+//
+// Set to 1 only when deliberately testing NVIDIA GOP recovery.
+//
+#define ENABLE_NVIDIA_GOP_DRIVER_RECONNECT 1
 
 #define PCI_EXT_CAP_ID_VSEC       0x000B
 #define PCI_EXT_CAP_ID_REBAR      0x0015
@@ -2696,12 +2700,54 @@ PostResizeDiagnostics:
   // Compare the GOP state captured before resizing with its current state.
   // This also runs after a failed or rolled-back transaction.
   //
-  RunNvidiaGopPostResizeDiagnostics(ImageHandle, &GopSnapshot);
+RunNvidiaGopPostResizeDiagnostics(ImageHandle, &GopSnapshot);
 
-  if (EFI_ERROR(TransactionStatus)) {
-    Print(L"\nBAR1 resize transaction returned: %r\n", TransactionStatus);
-    return TransactionStatus;
+#if ENABLE_NVIDIA_GOP_DRIVER_RECONNECT
+
+  //
+  // Experimental phase: only run after a successful BAR1 transaction.
+  // This is deliberately separate from the resize transaction.
+  //
+  if (!EFI_ERROR(TransactionStatus)) {
+    NVIDIA_GOP_SNAPSHOT ReconnectedSnapshot;
+    EFI_STATUS ReconnectStatus;
+    EFI_STATUS CaptureStatus;
+
+    Print(L"\n");
+    Print(L"===============================================\n");
+    Print(L" STARTING EXPERIMENTAL GOP DRIVER RECOVERY\n");
+    Print(L"===============================================\n");
+
+    ReconnectStatus =
+      RunNvidiaGopDriverReconnect(ImageHandle);
+
+    Print(L"GOP driver reconnect experiment returned: %r\n",
+          ReconnectStatus);
+
+    //
+    // Attempt to capture GOP even if ConnectController reported
+    // an error. The protocol may nevertheless have been installed.
+    //
+    CaptureStatus =
+      CaptureNvidiaGop(ImageHandle, &ReconnectedSnapshot);
+
+    if (!EFI_ERROR(CaptureStatus)) {
+      RunNvidiaGopPostResizeDiagnostics(
+        ImageHandle,
+        &ReconnectedSnapshot
+        );
+    } else {
+      Print(L"Post-reconnect GOP capture failed: %r\n",
+            CaptureStatus);
+    }
   }
 
-  return EFI_SUCCESS;
+#endif
+
+if (EFI_ERROR(TransactionStatus)) {
+  Print(L"\nBAR1 resize transaction returned: %r\n",
+        TransactionStatus);
+  return TransactionStatus;
 }
+
+return EFI_SUCCESS;
