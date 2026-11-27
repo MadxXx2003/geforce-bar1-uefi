@@ -1,4 +1,4 @@
-
+// SPDX-License-Identifier: MIT
 #ifndef NVIDIA_GOP_DIAGNOSTICS_H
 #define NVIDIA_GOP_DIAGNOSTICS_H
 
