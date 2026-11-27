@@ -22,7 +22,6 @@
   UefiLib
   MemoryAllocationLib
   DxeServicesTableLib
-  VarCheckHiiLibMmDependency
 
 [Protocols]
   gEfiPciIoProtocolGuid
