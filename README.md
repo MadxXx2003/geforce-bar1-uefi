@@ -22,6 +22,7 @@ Push this repository to GitHub and run **Actions → Build UEFI PCI resource aud
 5. Save the complete output.
 
 note this project require your system already having above 4g decoding be on and working 
+if you need more than 8gb bar1 sorry you will have to change the id in the source to a higher value
 
 ## Acknowledgements
 
