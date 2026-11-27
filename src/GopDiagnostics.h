@@ -1,4 +1,4 @@
-
+// SPDX-License-Identifier: GPL-3.0-or-later
 #ifndef NVIDIA_GOP_DIAGNOSTICS_H
 #define NVIDIA_GOP_DIAGNOSTICS_H
 

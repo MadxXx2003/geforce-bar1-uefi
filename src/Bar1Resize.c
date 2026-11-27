@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /**
   Standalone, post-enumeration BAR1 resize transaction for the HP ZBook 17 G6.
 
