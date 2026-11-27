@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /**
   Standalone, post-enumeration BAR1 resize transaction for the HP ZBook 17 G6.
 
