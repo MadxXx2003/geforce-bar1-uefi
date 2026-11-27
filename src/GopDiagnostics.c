@@ -679,7 +679,21 @@ FindNvidiaDriverImage (
 
     if (DriverAgent != NULL) {
       Print(L"GOP recovery: multiple BY_DRIVER owners found.\n");
-      FreePool(Entries);
+      for (Index = 0; Index < EntryCount; Index++) {
+        if (Entries[Index].AgentHandle == DriverAgent &&
+            (Entries[Index].Attributes &
+             EFI_OPEN_PROTOCOL_BY_CHILD_CONTROLLER) != 0) {
+      
+          Print(
+            L"  NVIDIA driver child controller: %p (opens=%u)\n",
+            Entries[Index].ControllerHandle,
+            Entries[Index].OpenCount
+            );
+        }
+      }
+      if (Entries != NULL) {
+        FreePool(Entries);
+      }
       return EFI_ACCESS_DENIED;
     }
 
@@ -945,6 +959,57 @@ CompareNvidiaPciStates (
         Same ? L"YES" : L"NO - REVIEW THE SNAPSHOTS");
 }
 
+STATIC
+VOID
+PrintHandleProtocols (
+  IN CONST CHAR16 *Label,
+  IN EFI_HANDLE Handle
+  )
+{
+  EFI_STATUS Status;
+  EFI_GUID **ProtocolGuids;
+  UINTN Count;
+  UINTN Index;
+
+  ProtocolGuids = NULL;
+  Count = 0;
+
+  Print(L"\nProtocols on %s handle %p:\n", Label, Handle);
+
+  Status = gBS->ProtocolsPerHandle(
+                  Handle,
+                  &ProtocolGuids,
+                  &Count
+                  );
+
+  if (EFI_ERROR(Status)) {
+    Print(L"  Protocol enumeration failed: %r\n", Status);
+    return;
+  }
+
+  for (Index = 0; Index < Count; Index++) {
+    if (CompareGuid(ProtocolGuids[Index],
+                    &gEfiGraphicsOutputProtocolGuid)) {
+      Print(L"  Graphics Output Protocol\n");
+    } else if (CompareGuid(ProtocolGuids[Index],
+                           &gEfiPciIoProtocolGuid)) {
+      Print(L"  PCI I/O Protocol\n");
+    } else if (CompareGuid(ProtocolGuids[Index],
+                           &gEfiDevicePathProtocolGuid)) {
+      Print(L"  Device Path Protocol\n");
+    } else if (CompareGuid(ProtocolGuids[Index],
+                           &gEfiDriverBindingProtocolGuid)) {
+      Print(L"  Driver Binding Protocol\n");
+    } else {
+      Print(L"  %g\n", ProtocolGuids[Index]);
+    }
+  }
+
+  if (ProtocolGuids != NULL) {
+    FreePool(ProtocolGuids);
+  }
+}
+
 EFI_STATUS
 EFIAPI
 RunNvidiaGopDriverReconnect (
@@ -984,6 +1049,7 @@ RunNvidiaGopDriverReconnect (
              NVIDIA_DEVICE_ID,
              &GpuHandle
              );
+  PrintHandleProtocols(L"NVIDIA GPU", GpuHandle);
 
   if (EFI_ERROR(Status)) {
     Print(L"GOP recovery: target GPU not found: %r\n", Status);
@@ -1029,6 +1095,7 @@ RunNvidiaGopDriverReconnect (
                 &Gop
                 );
 
+  PrintHandleProtocols(L"Original NVIDIA GOP", OldGopHandle);
   if (!EFI_ERROR(GopStatus)) {
     Print(L"Old GOP handle: %p\n", OldGopHandle);
     ReportNvidiaGopFramebuffer(L"before driver disconnect", Gop);
@@ -1093,7 +1160,9 @@ RunNvidiaGopDriverReconnect (
                 &NewGopHandle,
                 &Gop
                 );
-
+  
+  PrintHandleProtocols(L"Reconnected NVIDIA GOP", NewGopHandle);
+  
   if (EFI_ERROR(GopStatus)) {
     Print(L"\nNew NVIDIA GOP not found: %r\n", GopStatus);
   } else {
