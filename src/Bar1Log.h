@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #ifndef BAR1_LOG_H
 #define BAR1_LOG_H
 
