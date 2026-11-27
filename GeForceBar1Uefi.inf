@@ -6,12 +6,13 @@
   BASE_NAME                      = GeForceBar1Uefi
   FILE_GUID                      = 2F7E4B31-9E8D-4C1B-A64D-4A17D81A9B20
   MODULE_TYPE                    = UEFI_APPLICATION
-  VERSION_STRING                 = 0.3
+  VERSION_STRING                 = 0.4
   ENTRY_POINT                    = UefiMain
 
 [Sources]
   src/GeForceBar1Uefi.c
   src/Bar1Resize.c
+  src/GopDiagnostics.c
 
 [Packages]
   MdePkg/MdePkg.dec
@@ -25,5 +26,7 @@
 
 [Protocols]
   gEfiPciIoProtocolGuid
+  gEfiGraphicsOutputProtocolGuid
+  gEfiDevicePathProtocolGuid
   gEfiPciRootBridgeIoProtocolGuid
   gEfiPciHostBridgeResourceAllocationProtocolGuid
