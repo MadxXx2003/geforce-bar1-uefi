@@ -1,4 +1,4 @@
-
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <Uefi.h>
 #include <Protocol/PciIo.h>
 #include <Protocol/GraphicsOutput.h>
