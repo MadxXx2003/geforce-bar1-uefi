@@ -126,27 +126,35 @@ BootWindows(
       continue;
     }
 
-    Bar1LogEvent(L"Windows Boot Manager loaded; calling StartImage");
-
+    Bar1LogEvent(L"Handing control to Windows bootx64.efi");
+    Bar1LogEvent(L"Handing control to Windows bootx64.efi");
+    
     Status = gBS->StartImage(
                     BootImage,
                     NULL,
                     NULL
                     );
-
+    
+    /*
+     * Windows Boot Manager returned control to our UEFI application.
+     * This normally means boot was unsuccessful or the boot manager
+     * returned for another reason.
+     */
     Bar1LogStatus(L"Windows Boot Manager StartImage returned", Status);
-
+    
     if (!EFI_ERROR(Status)) {
-      FreePool(Handles);
-      return EFI_SUCCESS;
+      Bar1LogEvent(L"WARNING: Windows Boot Manager returned without reporting an error.");
+    } else {
+      Bar1LogEvent(L"WARNING: Windows Boot Manager failed to start or returned an error.");
     }
-
-    gBS->UnloadImage(BootImage);
-  }
-
-  FreePool(Handles);
-
-  Bar1LogEvent(L"Windows Boot Manager was not successfully launched");
-
+    
+    /* Keep the log available after Windows Boot Manager returns. */
+    Bar1LogEvent(L"UEFI fallback: Windows did not take control. Returning to diagnostics.");
+    
+    Bar1LogClose();
+    
+    if (Handles != NULL) {
+      FreePool(Handles);
+    }
   return EFI_NOT_FOUND;
 }
