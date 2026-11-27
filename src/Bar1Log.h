@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #ifndef BAR1_LOG_H
 #define BAR1_LOG_H
 
