@@ -88,13 +88,19 @@
 #define PREF_WINDOW_TARGET_BYTES  0x0000000202000000ULL /* 8 GiB + 32 MiB */
 #define PREF_WINDOW_TARGET_END    0x00000043FFFFFFFFULL
 
-/* Implemented in src/Bar1Resize.c; invoked only after the read-only scan. */
+/* Implemented in src/Bar1Resize.c . */
 EFI_STATUS
 EFIAPI
 RunBar1ResizeTransaction (
   IN EFI_HANDLE ImageHandle
   );
 
+/* Implemented in src/BootWindows.c . */
+EFI_STATUS
+EFIAPI
+BootWindows (
+  IN EFI_HANDLE ImageHandle
+  );
 
 STATIC
 EFI_STATUS
@@ -2788,6 +2794,10 @@ PostResizeDiagnostics:
   Bar1LogEvent(L"Starting Windows Boot Manager discovery");
   
   Status = BootWindows(ImageHandle);
-    
-  return EFI_SUCCESS;
+  
+  Bar1LogStatus(L"BootWindows returned", Status);
+  
+  Bar1LogClose();
+  
+  return Status;
 }
