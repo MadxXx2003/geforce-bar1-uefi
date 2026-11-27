@@ -69,6 +69,11 @@
 #define PREF_NEW_BASE_UPPER         0x00000041
 #define PREF_NEW_LIMIT_UPPER        0x00000043
 
+
+#define REQUIRE_RESIZE_CONFIRMATION  0
+
+
+
 STATIC
 EFI_STATUS
 CfgRead32(EFI_PCI_IO_PROTOCOL *PciIo, UINT32 Offset, UINT32 *Value)
@@ -343,6 +348,7 @@ RunBar1ResizeTransaction(IN EFI_HANDLE ImageHandle)
     goto Done;
   }
 
+#if REQUIRE_RESIZE_CONFIRMATION
   Status = WaitForResizeConfirmation();
   if (EFI_ERROR(Status)) {
     Print(L"Cancelled; no hardware changes made.\n");
@@ -350,7 +356,9 @@ RunBar1ResizeTransaction(IN EFI_HANDLE ImageHandle)
     Status = EFI_ABORTED;
     goto Done;
   }
-
+#else
+  Bar1LogEvent(L"Resize confirmation bypassed; proceeding automatically.");
+#endif
   /* Reserve the complete 8224-MiB window in GCD before touching hardware. */
   Status = gDS->AllocateMemorySpace(EfiGcdAllocateAddress,
                                     EfiGcdMemoryTypeMemoryMappedIo,
