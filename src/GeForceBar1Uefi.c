@@ -12,6 +12,7 @@
     - Bus-number-based parent-bridge association
     - PCI bridge-window decoding and 8-GiB comparison
     - PCIe extended-capability traversal and ReBAR/VSEC inspection
+    - Root-bridge apertures and DXE GCD memory-space descriptors
 **/
 
 #include <Uefi.h>
@@ -22,6 +23,8 @@
 #include <Library/UefiLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/MemoryAllocationLib.h>
+#include <Pi/PiDxeCis.h>
+#include <Library/DxeServicesTableLib.h>
 
 #define NVIDIA_VENDOR_ID          0x10DE
 
@@ -42,7 +45,7 @@
  * Set to 1 to dump all aligned dwords from 0x100 through 0xFFC.
  * Leave at 0 for the compact targeted dump.
  */
-#define DUMP_FULL_EXT_CONFIG 0
+#define DUMP_FULL_EXT_CONFIG 1
 
 #define PCI_EXT_CAP_ID_VSEC       0x000B
 #define PCI_EXT_CAP_ID_REBAR      0x0015
@@ -1448,6 +1451,14 @@ PrintRootBridgeResourceMaps (
             L"    host-bridge allocation attributes: %016Lx\n",
             AllocationAttributes
             );
+          Print(
+            L"      combine MEM/PMEM windows: %s\n",
+            (AllocationAttributes & EFI_PCI_HOST_BRIDGE_COMBINE_MEM_PMEM) != 0 ? L"yes" : L"no"
+            );
+          Print(
+            L"      64-bit memory decode:     %s\n",
+            (AllocationAttributes & EFI_PCI_HOST_BRIDGE_MEM64_DECODE) != 0 ? L"yes" : L"no"
+            );
         }
         Print(L"    NOTE: protocol presence does not mean late reallocation is legal.\n");
       }
@@ -1469,6 +1480,200 @@ PrintRootBridgeResourceMaps (
 
   Print(L"=== END ROOT-BRIDGE RESOURCE MAPS ===\n");
   Print(L"NOTE: these are firmware-reported current apertures, not a free-MMIO map.\n");
+}
+
+/**
+  Return a readable name for a GCD memory-space type.
+**/
+STATIC
+CONST CHAR16 *
+GcdMemoryTypeName (
+  IN EFI_GCD_MEMORY_TYPE Type
+  )
+{
+  switch (Type) {
+    case EfiGcdMemoryTypeNonExistent:
+      return L"NonExistent";
+    case EfiGcdMemoryTypeReserved:
+      return L"Reserved";
+    case EfiGcdMemoryTypeSystemMemory:
+      return L"SystemMemory";
+    case EfiGcdMemoryTypeMemoryMappedIo:
+      return L"MemoryMappedIo";
+    case EfiGcdMemoryTypePersistent:
+      return L"Persistent";
+    case EfiGcdMemoryTypeMoreReliable:
+      return L"MoreReliable";
+    case EfiGcdMemoryTypeUnaccepted:
+      return L"Unaccepted";
+    default:
+      return L"Unknown";
+  }
+}
+
+/**
+  Determine whether a descriptor contains a target-sized, target-aligned
+  subrange. BARs must be aligned to their decoded size.
+**/
+STATIC
+BOOLEAN
+FindAlignedWindow (
+  IN UINT64 Base,
+  IN UINT64 Length,
+  IN UINT64 WindowSize,
+  OUT UINT64 *WindowBase
+  )
+{
+  UINT64 AlignedBase;
+  UINT64 Offset;
+  UINT64 MaxUint64;
+
+  if ((WindowBase == NULL) || (WindowSize == 0) ||
+      ((WindowSize & (WindowSize - 1)) != 0) || (Length < WindowSize))
+  {
+    return FALSE;
+  }
+
+  MaxUint64 = ~(UINT64)0;
+  if ((Base > (MaxUint64 - (WindowSize - 1))) ||
+      (Length - 1 > (MaxUint64 - Base)))
+  {
+    return FALSE;
+  }
+
+  AlignedBase = (Base + WindowSize - 1) & ~(WindowSize - 1);
+  if (AlignedBase < Base) {
+    return FALSE;
+  }
+
+  Offset = AlignedBase - Base;
+  if ((Offset > Length) || (WindowSize > (Length - Offset))) {
+    return FALSE;
+  }
+
+  *WindowBase = AlignedBase;
+  return TRUE;
+}
+
+/**
+  Print the DXE Global Coherency Domain (GCD) memory-space map.
+
+  This is query-only. In particular, NonExistent ranges are not assumed to
+  be usable MMIO: they are merely address ranges that no component currently
+  decodes. A free MemoryMappedIo descriptor with no ImageHandle is a stronger
+  candidate, but it still does not prove that the PCI host bridge can decode
+  or allocate the range. No GCD allocation or AddMemorySpace operation occurs.
+**/
+STATIC
+VOID
+PrintGcdMemorySpaceMap (
+  VOID
+  )
+{
+  EFI_STATUS Status;
+  UINTN DescriptorCount;
+  UINTN Index;
+  EFI_GCD_MEMORY_SPACE_DESCRIPTOR *Map;
+  EFI_GCD_MEMORY_SPACE_DESCRIPTOR *Descriptor;
+  UINT64 WindowBase;
+  UINT64 EndAddress;
+  UINT64 MaxUint64;
+  BOOLEAN HasAlignedWindow;
+  BOOLEAN PrintedAny;
+
+  Print(L"\n=== DXE GCD MEMORY-SPACE MAP (READ ONLY) ===\n");
+
+  if ((gDS == NULL) || (gDS->GetMemorySpaceMap == NULL)) {
+    Print(L"DXE Services / GetMemorySpaceMap unavailable.\n");
+    Print(L"=== END GCD MAP ===\n");
+    return;
+  }
+
+  DescriptorCount = 0;
+  Map = NULL;
+  Status = gDS->GetMemorySpaceMap(&DescriptorCount, &Map);
+  if (EFI_ERROR(Status) || (Map == NULL)) {
+    Print(L"GetMemorySpaceMap(): %r (descriptors=%u map=%p)\n",
+          Status, DescriptorCount, Map);
+    Print(L"=== END GCD MAP ===\n");
+    return;
+  }
+
+  Print(L"GCD memory descriptors: %u\n", DescriptorCount);
+  Print(L"Target window size/alignment: %016Lx bytes\n", BAR1_TARGET_BYTES);
+  MaxUint64 = ~(UINT64)0;
+  PrintedAny = FALSE;
+
+  for (Index = 0; Index < DescriptorCount; Index++) {
+    Descriptor = &Map[Index];
+
+    /* Keep the report focused on MMIO and large address-space ranges. */
+    if ((Descriptor->GcdMemoryType != EfiGcdMemoryTypeMemoryMappedIo) &&
+        (Descriptor->Length < BAR1_TARGET_BYTES))
+    {
+      continue;
+    }
+
+    PrintedAny = TRUE;
+    if ((Descriptor->Length == 0) ||
+        (Descriptor->BaseAddress > (MaxUint64 - (Descriptor->Length - 1))))
+    {
+      EndAddress = MaxUint64;
+    } else {
+      EndAddress = Descriptor->BaseAddress + Descriptor->Length - 1;
+    }
+
+    Print(
+      L"  gcd[%u]: type=%s base=%016Lx end=%016Lx length=%016Lx\n",
+      Index,
+      GcdMemoryTypeName(Descriptor->GcdMemoryType),
+      Descriptor->BaseAddress,
+      EndAddress,
+      Descriptor->Length
+      );
+    Print(
+      L"           capabilities=%016Lx attributes=%016Lx image=%p device=%p\n",
+      Descriptor->Capabilities,
+      Descriptor->Attributes,
+      Descriptor->ImageHandle,
+      Descriptor->DeviceHandle
+      );
+
+    HasAlignedWindow = FindAlignedWindow(
+                         Descriptor->BaseAddress,
+                         Descriptor->Length,
+                         BAR1_TARGET_BYTES,
+                         &WindowBase
+                         );
+    if (!HasAlignedWindow) {
+      continue;
+    }
+
+    if ((Descriptor->GcdMemoryType == EfiGcdMemoryTypeMemoryMappedIo) &&
+        (Descriptor->ImageHandle == NULL))
+    {
+      Print(
+        L"           8-GiB aligned UNALLOCATED MMIO candidate: %016Lx - %016Lx\n",
+        WindowBase,
+        WindowBase + BAR1_TARGET_BYTES - 1
+        );
+    } else if (Descriptor->GcdMemoryType == EfiGcdMemoryTypeNonExistent) {
+      Print(
+        L"           8-GiB aligned NONEXISTENT range: %016Lx - %016Lx\n",
+        WindowBase,
+        WindowBase + BAR1_TARGET_BYTES - 1
+        );
+      Print(L"           not registered as MMIO; platform decode/registration required\n");
+    }
+  }
+
+  if (!PrintedAny) {
+    Print(L"No MMIO or target-sized GCD descriptors were reported.\n");
+  }
+
+  FreePool(Map);
+  Print(L"No GCD ranges were added, allocated, freed, or modified.\n");
+  Print(L"=== END GCD MAP ===\n");
 }
 
 /**
@@ -1520,6 +1725,7 @@ UefiMain (
   Print(L"Firmware inventory only. No PCI writes, driver disconnects, or device removal.\n");
   Print(L"BAR1 target for feasibility checks: %016Lx bytes (8 GiB).\n\n", BAR1_TARGET_BYTES);
   PrintRootBridgeResourceMaps(ImageHandle);
+  PrintGcdMemorySpaceMap();
   Print(L"\n");
 
   Status = gBS->LocateHandleBuffer(
