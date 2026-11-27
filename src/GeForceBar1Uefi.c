@@ -1878,6 +1878,9 @@ PrintRootBridgeResourceMaps (
   UINT64 AllocationAttributes;
   EFI_HANDLE ParentHandle;
   BOOLEAN SawDescriptor;
+  BOOLEAN TargetCoveredByRootAperture;
+  BOOLEAN HostAllocAttributesValid;
+  BOOLEAN HostMem64Decode;
 
   RootHandles = NULL;
   RootCount = 0;
@@ -1903,6 +1906,9 @@ PrintRootBridgeResourceMaps (
     Resources = NULL;
     HostAlloc = NULL;
     ParentHandle = NULL;
+    TargetCoveredByRootAperture = FALSE;
+    HostAllocAttributesValid = FALSE;
+    HostMem64Decode = FALSE;
 
     Status = gBS->OpenProtocol(
                     RootHandles[Index],
@@ -1959,6 +1965,20 @@ PrintRootBridgeResourceMaps (
           Descriptor->AddrLen,
           Descriptor->AddrTranslationOffset
           );
+        /*
+         * Require one root-bridge memory aperture to cover the complete
+         * BAR3 + BAR1 window. A nonzero translation offset is treated as
+         * inconclusive here rather than silently assuming identity mapping.
+         */
+        if ((Descriptor->ResType == ACPI_ADDRESS_SPACE_TYPE_MEM) &&
+            (Descriptor->AddrRangeMin <= PREF_WINDOW_TARGET_BASE) &&
+            (Descriptor->AddrRangeMax >=
+               (PREF_WINDOW_TARGET_BASE +
+                PREF_WINDOW_TARGET_BYTES - 1)) &&
+            (Descriptor->AddrTranslationOffset == 0)) {
+          TargetCoveredByRootAperture = TRUE;
+          
+        }
         Descriptor++;
       }
 
@@ -1970,6 +1990,10 @@ PrintRootBridgeResourceMaps (
       }
       /* Per UEFI, Configuration() owns this buffer; do not FreePool(). */
     }
+    Print(
+      L"    Full target inside identity-mapped root memory aperture: %s\n",
+      TargetCoveredByRootAperture ? L"YES" : L"NO"
+      );
 
     if (ParentHandle != NULL) {
       Status = gBS->HandleProtocol(
@@ -1989,6 +2013,9 @@ PrintRootBridgeResourceMaps (
         if (EFI_ERROR(Status)) {
           Print(L"    GetAllocAttributes(): %r\n", Status);
         } else {
+          HostAllocAttributesValid = TRUE;
+          HostMem64Decode =
+            ((AllocationAttributes & EFI_PCI_HOST_BRIDGE_MEM64_DECODE) != 0);
           Print(
             L"    host-bridge allocation attributes: %016Lx\n",
             AllocationAttributes
