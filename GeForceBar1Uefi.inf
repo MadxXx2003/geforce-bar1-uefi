@@ -26,6 +26,7 @@
   MemoryAllocationLib
   DxeServicesTableLib
   DevicePathLib
+  PrintLib
 
 [Protocols]
   gEfiLoadedImageProtocolGuid
