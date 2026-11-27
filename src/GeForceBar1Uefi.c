@@ -1,4 +1,4 @@
-
+// SPDX-License-Identifier: GPL-3.0-or-later
 /** @file
   Read-only PCI inventory and BAR1 preflight for the GeForce BAR1 UEFI project.
 
