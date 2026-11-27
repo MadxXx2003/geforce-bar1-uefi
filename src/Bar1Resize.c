@@ -18,6 +18,7 @@
 #include <PiDxe.h>
 #include <Library/DxeServicesTableLib.h>
 #include <Pi/PiDxeCis.h>
+#include "Bar1Log.h"
 
 #define GPU_VENDOR                 0x10DE
 #define GPU_DEVICE                 0x1F36
@@ -79,7 +80,21 @@ STATIC
 EFI_STATUS
 CfgWrite32(EFI_PCI_IO_PROTOCOL *PciIo, UINT32 Offset, UINT32 Value)
 {
-  return PciIo->Pci.Write(PciIo, EfiPciIoWidthUint32, Offset, 1, &Value);
+  EFI_STATUS Status;
+
+  Bar1LogPciWrite(Offset, Value, 32, TRUE, EFI_SUCCESS);
+
+  Status = PciIo->Pci.Write(
+                    PciIo,
+                    EfiPciIoWidthUint32,
+                    Offset,
+                    1,
+                    &Value
+                    );
+
+  Bar1LogPciWrite(Offset, Value, 32, FALSE, Status);
+
+  return Status;
 }
 
 STATIC
@@ -94,7 +109,21 @@ STATIC
 EFI_STATUS
 CfgWrite16(EFI_PCI_IO_PROTOCOL *PciIo, UINT32 Offset, UINT16 Value)
 {
-  return PciIo->Pci.Write(PciIo, EfiPciIoWidthUint16, Offset, 1, &Value);
+  EFI_STATUS Status;
+
+  Bar1LogPciWrite(Offset, Value, 16, TRUE, EFI_SUCCESS);
+
+  Status = PciIo->Pci.Write(
+                    PciIo,
+                    EfiPciIoWidthUint16,
+                    Offset,
+                    1,
+                    &Value
+                    );
+
+  Bar1LogPciWrite(Offset, Value, 16, FALSE, Status);
+
+  return Status;
 }
 
 STATIC
@@ -316,7 +345,8 @@ RunBar1ResizeTransaction(IN EFI_HANDLE ImageHandle)
   Status = WaitForResizeConfirmation();
   if (EFI_ERROR(Status)) {
     Print(L"Cancelled; no hardware changes made.\n");
-    Status = EFI_SUCCESS;
+    Bar1LogEvent(L"User cancelled transaction");
+    Status = EFI_ABORTED;
     goto Done;
   }
 

@@ -27,6 +27,7 @@
 #include <Pi/PiDxeCis.h>
 #include <Library/DxeServicesTableLib.h>
 #include "GopDiagnostics.h"
+#include "Bar1Log.h"
 
 #define NVIDIA_VENDOR_ID          0x10DE
 #define NVIDIA_TARGET_DEVICE_ID   0x1F36
@@ -2499,13 +2500,47 @@ UefiMain (
   // Capture the original GOP state before changing PCI configuration.
   // This function should remain silent.
   //
+
+  Status = Bar1LogInitialize(ImageHandle);
+
+  if (EFI_ERROR(Status)) {
+    Print(L"WARNING: Could not initialize log file: %r\n", Status);
+  } else {
+    Bar1LogEvent(L"GeForce BAR1 UEFI application started");
+  }
+  
   (VOID)CaptureNvidiaGop(ImageHandle, &GopSnapshot);
 
   //
   // Perform the BAR1 resize transaction first.
   //
+  Bar1LogEvent(L"Capturing original GOP information");
+  (void)CaptureNvidiaGop(ImageHandle, &GopSnapshot);
+  
+  Bar1LogEvent(L"Starting BAR1 resize transaction");
+  
   TransactionStatus = RunBar1ResizeTransaction(ImageHandle);
+  
+  Bar1LogStatus(
+    L"BAR1 resize transaction returned",
+    TransactionStatus
+    );
 
+  //
+  // Minimal post-resize path.
+  //
+  // Do not run GOP Blt(), SetMode(), driver disconnect/reconnect,
+  // or the large post-resize PCI/GCD inventory scan.
+  //
+  // If the transaction succeeds, immediately attempt Windows boot.
+  //
+  if (EFI_ERROR(TransactionStatus)) {
+    Bar1LogEvent(L"Resize failed or was cancelled; Windows boot skipped");
+    Bar1LogClose();
+    return TransactionStatus;
+  }
+  
+  Bar1LogEvent(L"BAR1 resize verified");
   //
   // Everything below is post-transaction diagnostics.
   // Run even if the transaction failed or rolled back.
@@ -2749,6 +2784,10 @@ PostResizeDiagnostics:
           TransactionStatus);
     return TransactionStatus;
   }
+    
+  Bar1LogEvent(L"Starting Windows Boot Manager discovery");
   
+  Status = BootWindows(ImageHandle);
+    
   return EFI_SUCCESS;
 }
