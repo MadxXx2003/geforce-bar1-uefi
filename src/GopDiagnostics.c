@@ -15,6 +15,64 @@
 #define GOP_TEST_WIDTH    8
 #define GOP_TEST_HEIGHT   8
 
+/*
+ * Machine-specific BAR1 locations established by the Linux-tested layout.
+ * The old framebuffer base was observed as 0xA0000000 before resizing.
+ */
+#define NVIDIA_OLD_BAR1_BASE     0xA0000000ULL
+#define NVIDIA_NEW_BAR1_BASE     0x4200000000ULL
+#define NVIDIA_NEW_BAR1_SIZE     0x200000000ULL
+
+STATIC
+VOID
+ReportNvidiaGopFramebuffer (
+  IN CONST CHAR16 *When,
+  IN EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop
+  )
+{
+  UINT64 FbBase;
+  UINT64 FbSize;
+  UINT64 FbEnd;
+  UINT64 Bar1End;
+  UINT64 MaxUint64;
+
+  if (Gop == NULL || Gop->Mode == NULL) {
+    Print(L"GOP %s: no mode structure\n", When);
+    return;
+  }
+
+  FbBase = Gop->Mode->FrameBufferBase;
+  FbSize = Gop->Mode->FrameBufferSize;
+  MaxUint64 = ~(UINT64)0;
+  Bar1End = NVIDIA_NEW_BAR1_BASE + NVIDIA_NEW_BAR1_SIZE - 1;
+
+  if (FbSize == 0 || FbBase > MaxUint64 - (FbSize - 1)) {
+    Print(
+      L"GOP %s: invalid framebuffer range base=%016Lx size=%016Lx\n",
+      When, FbBase, FbSize
+      );
+    return;
+  }
+
+  FbEnd = FbBase + FbSize - 1;
+
+  Print(
+    L"GOP %s framebuffer: %016Lx-%016Lx (%Lu bytes)\n",
+    When, FbBase, FbEnd, FbSize
+    );
+
+  if (FbBase >= NVIDIA_NEW_BAR1_BASE && FbEnd <= Bar1End) {
+    Print(L"GOP %s: framebuffer is inside the new 8-GiB BAR1 range\n", When);
+
+  } else if (FbBase == NVIDIA_OLD_BAR1_BASE) {
+    Print(L"GOP %s: STALE OLD BAR1 BASE — GOP has not remapped its framebuffer\n",
+          When);
+
+  } else {
+    Print(L"GOP %s: framebuffer is outside the new BAR1 range\n", When);
+  }
+}
+
 STATIC
 EFI_STATUS
 OpenNvidiaGop (
@@ -339,6 +397,7 @@ RunNvidiaGopPostResizeDiagnostics (
 
   if (Gop->Mode == NULL || Gop->Mode->Info == NULL) {
     Print(L"GOP post: mode information unavailable\n");
+    ReportNvidiaGopFramebuffer(L"before recovery", Gop);
     CloseNvidiaGop(ImageHandle, Handle);
     return;
   }
@@ -386,8 +445,9 @@ RunNvidiaGopPostResizeDiagnostics (
 
     SetModeStatus =
       Gop->SetMode(Gop, Snapshot->ModeNumber);
+  } if (!EFI_ERROR(SetModeStatus)) {
+    ReportNvidiaGopFramebuffer(L"after SetMode", Gop);
   }
-
   Print(
     L"GOP SetMode(saved=%u): %r\n",
     (Snapshot != NULL && Snapshot->Valid) ?
