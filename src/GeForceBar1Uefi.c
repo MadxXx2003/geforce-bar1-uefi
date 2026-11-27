@@ -27,6 +27,7 @@
 #include <Library/DxeServicesTableLib.h>
 
 #define NVIDIA_VENDOR_ID          0x10DE
+#define NVIDIA_TARGET_DEVICE_ID   0x1F36
 
 #define PCI_CLASS_DISPLAY         0x03
 #define PCI_CLASS_BRIDGE          0x06
@@ -45,7 +46,7 @@
  * Set to 1 to dump all aligned dwords from 0x100 through 0xFFC.
  * Leave at 0 for the compact targeted dump.
  */
-#define DUMP_FULL_EXT_CONFIG 1
+#define DUMP_FULL_EXT_CONFIG 0
 
 #define PCI_EXT_CAP_ID_VSEC       0x000B
 #define PCI_EXT_CAP_ID_REBAR      0x0015
@@ -99,6 +100,7 @@ typedef struct {
   UINT16 DeviceId;
   UINT8 BaseClass;
   UINT8 SubClass;
+  UINT8 ProgIf;
   UINT8 HeaderType;
   UINT8 SecondaryBus;
   UINT8 SubordinateBus;
@@ -173,6 +175,7 @@ CollectPciRecords (
     Records[Index].DeviceId = (UINT16)(IdReg >> 16);
     Records[Index].BaseClass = (UINT8)(ClassReg >> 24);
     Records[Index].SubClass = (UINT8)(ClassReg >> 16);
+    Records[Index].ProgIf = (UINT8)(ClassReg >> 8);
     Records[Index].HeaderType = (UINT8)((HeaderReg >> 16) & 0x7F);
 
     if (Records[Index].HeaderType == PCI_HEADER_TYPE_BRIDGE &&
@@ -198,6 +201,180 @@ CollectPciRecords (
   Find the PCI-to-PCI bridge whose secondary bus is the endpoint's bus.
   This is a bus-number topology association, not a resource-allocation claim.
 **/
+
+
+/**
+  Locate the exact target GPU by complete PCI address and identity.
+**/
+STATIC
+PCI_DEVICE_RECORD *
+FindTargetGpuRecord (
+  IN PCI_DEVICE_RECORD *Records,
+  IN UINTN RecordCount
+  )
+{
+  UINTN Index;
+
+  for (Index = 0; Index < RecordCount; Index++) {
+    if (Records[Index].Valid &&
+        Records[Index].Segment == 0 &&
+        Records[Index].Bus == 1 &&
+        Records[Index].Device == 0 &&
+        Records[Index].Function == 0 &&
+        Records[Index].Vendor == NVIDIA_VENDOR_ID &&
+        Records[Index].DeviceId == NVIDIA_TARGET_DEVICE_ID &&
+        Records[Index].BaseClass == PCI_CLASS_DISPLAY &&
+        Records[Index].SubClass == 0x00) {
+      return &Records[Index];
+    }
+  }
+
+  return NULL;
+}
+
+/**
+  Step 3: strictly audit the target GPU's companion functions.
+
+  This routine is READ ONLY. It does not disable functions or write PCI
+  configuration space.
+**/
+STATIC
+VOID
+PrintTargetCompanionAudit (
+  IN PCI_DEVICE_RECORD *Records,
+  IN UINTN RecordCount
+  )
+{
+  PCI_DEVICE_RECORD *Gpu;
+  PCI_DEVICE_RECORD *Record;
+  UINTN Index;
+  BOOLEAN SawAudio;
+  BOOLEAN SawXhci;
+  BOOLEAN SawUcsi;
+
+  SawAudio = FALSE;
+  SawXhci = FALSE;
+  SawUcsi = FALSE;
+
+  Print(L"\n=== STEP 3: GPU COMPANION AUDIT ===\n");
+
+  Gpu = FindTargetGpuRecord(Records, RecordCount);
+
+  if (Gpu == NULL) {
+    Print(L"ERROR: exact target GPU 0000:01:00.0 10DE:1F36 not found.\n");
+    Print(L"No companion functions selected.\n");
+    Print(L"=== END STEP 3 ===\n");
+    return;
+  }
+
+  Print(L"Target GPU: %04x:%02x:%02x.%x %04x:%04x\n",
+        Gpu->Segment,
+        Gpu->Bus,
+        Gpu->Device,
+        Gpu->Function,
+        Gpu->Vendor,
+        Gpu->DeviceId);
+
+  Print(L"Scanning only the exact same segment/bus/device.\n");
+
+  for (Index = 0; Index < RecordCount; Index++) {
+    Record = &Records[Index];
+
+    if (!Record->Valid ||
+        Record->Segment != Gpu->Segment ||
+        Record->Bus != Gpu->Bus ||
+        Record->Device != Gpu->Device ||
+        Record->Function == Gpu->Function) {
+      continue;
+    }
+
+    Print(L"\n  Function %04x:%02x:%02x.%x\n",
+          Record->Segment,
+          Record->Bus,
+          Record->Device,
+          Record->Function);
+
+    Print(L"    ID:    %04x:%04x\n",
+          Record->Vendor,
+          Record->DeviceId);
+
+    Print(L"    Class: %02x:%02x:%02x\n",
+          Record->BaseClass,
+          Record->SubClass,
+          Record->ProgIf);
+
+    if (Record->Vendor != NVIDIA_VENDOR_ID) {
+      Print(L"    RESULT: non-NVIDIA same-slot function; ignored.\n");
+      continue;
+    }
+
+    /*
+     * HDMI audio function .1 is explicitly excluded.
+     */
+    if (Record->Function == 1 &&
+        Record->BaseClass == 0x04 &&
+        Record->SubClass == 0x03) {
+      SawAudio = TRUE;
+      Print(L"    RESULT: HDMI audio; NEVER a quiesce target.\n");
+      continue;
+    }
+
+    /*
+     * NVIDIA xHCI: function .2, class 0C:03:30.
+     */
+    if (Record->Function == 2) {
+      if (Record->BaseClass == PCI_CLASS_USB &&
+          Record->SubClass == 0x03 &&
+          Record->ProgIf == 0x30) {
+        SawXhci = TRUE;
+        Print(L"    RESULT: VERIFIED xHCI companion candidate.\n");
+      } else {
+        Print(L"    RESULT: function .2 class mismatch; NOT selected.\n");
+      }
+
+      continue;
+    }
+
+    /*
+     * NVIDIA UCSI: function .3, class 0C:80:00.
+     */
+    if (Record->Function == 3) {
+      if (Record->BaseClass == PCI_CLASS_USB &&
+          Record->SubClass == 0x80 &&
+          Record->ProgIf == 0x00) {
+        SawUcsi = TRUE;
+        Print(L"    RESULT: VERIFIED UCSI companion candidate.\n");
+      } else {
+        Print(L"    RESULT: function .3 class mismatch; NOT selected.\n");
+      }
+
+      continue;
+    }
+
+    Print(L"    RESULT: same-slot NVIDIA function; not selected.\n");
+  }
+
+  Print(L"\n=== STEP 3 SUMMARY ===\n");
+
+  Print(L"HDMI audio .1 observed: %s\n",
+        SawAudio ? L"YES" : L"NO");
+
+  Print(L"xHCI .2 verified:      %s\n",
+        SawXhci ? L"YES" : L"NO");
+
+  Print(L"UCSI .3 verified:       %s\n",
+        SawUcsi ? L"YES" : L"NO");
+
+  if (SawXhci && SawUcsi) {
+    Print(L"RESULT: BOTH COMPANIONS VERIFIED.\n");
+  } else {
+    Print(L"RESULT: INCOMPLETE. DO NOT QUIESCE ANY FUNCTION.\n");
+  }
+
+  Print(L"PCI configuration writes: NONE.\n");
+  Print(L"=== END STEP 3 ===\n");
+}
+
 STATIC
 PCI_DEVICE_RECORD *
 FindParentBridge (
@@ -1707,6 +1884,7 @@ UefiMain (
 
   UINT8 BaseClass;
   UINT8 SubClass;
+  UINT8 ProgIf;
   UINT8 HeaderType;
 
   UINTN BarCount;
@@ -1750,6 +1928,7 @@ UefiMain (
   }
 
   CollectPciRecords(Handles, HandleCount, ImageHandle, Records);
+  PrintTargetCompanionAudit(Records, HandleCount);
 
   for (Index = 0; Index < HandleCount; Index++) {
     PciIo = NULL;
