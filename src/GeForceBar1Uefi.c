@@ -2309,40 +2309,261 @@ UefiMain (
   IN EFI_SYSTEM_TABLE *SystemTable
   )
 {
-  NVIDIA_GOP_SNAPSHOT GopSnapshot;
   EFI_STATUS Status;
+  EFI_STATUS TransactionStatus;
+
+  EFI_HANDLE *Handles;
+  UINTN HandleCount;
+  UINTN Index;
+  EFI_PCI_IO_PROTOCOL *PciIo;
+  PCI_DEVICE_RECORD *Records;
+
+  NVIDIA_GOP_SNAPSHOT GopSnapshot;
+
+  UINTN Segment;
+  UINTN Bus;
+  UINTN Device;
+  UINTN Function;
+
+  UINT32 IdReg;
+  UINT32 ClassReg;
+  UINT32 HeaderReg;
+
+  UINT16 Vendor;
+  UINT16 DeviceId;
+
+  UINT8 BaseClass;
+  UINT8 SubClass;
+  UINT8 HeaderType;
+
+  UINTN BarCount;
+
+  BOOLEAN IsNvidiaDisplay;
+  BOOLEAN IsRootPort;
 
   (VOID)SystemTable;
 
-  SetMem(&GopSnapshot, sizeof(GopSnapshot), 0);
-
-  Print(L"\n=== GeForce BAR1 UEFI ===\n");
-  Print(L"Running BAR1 transaction with minimal GOP diagnostics.\n");
+  Handles = NULL;
+  Records = NULL;
+  HandleCount = 0;
 
   //
-  // Capture the current NVIDIA GOP state silently.
-  // Results are printed only after the BAR1 transaction.
+  // Capture the original GOP state before changing PCI configuration.
+  // This function should remain silent.
   //
   (VOID)CaptureNvidiaGop(ImageHandle, &GopSnapshot);
 
   //
-  // Perform the existing BAR1 transaction unchanged.
+  // Perform the BAR1 resize transaction first.
   //
-  Status = RunBar1ResizeTransaction(ImageHandle);
+  TransactionStatus = RunBar1ResizeTransaction(ImageHandle);
 
   //
-  // Reacquire GOP and run diagnostics regardless of transaction status.
+  // Everything below is post-transaction diagnostics.
+  // Run even if the transaction failed or rolled back.
   //
-  Print(L"\n=== POST-TRANSACTION GOP DIAGNOSTICS ===\n");
+  Print(L"\n=== GeForce BAR1 UEFI - POST-TRANSACTION RESOURCE SCAN ===\n");
+  Print(L"PCI/GCD inventory captured after the resize transaction.\n");
+  Print(L"The NVIDIA 0x610 override probe temporarily changes and restores its register state.\n");
+  Print(L"BAR1 target: %016Lx bytes (8 GiB).\n\n", BAR1_TARGET_BYTES);
 
-  RunNvidiaGopPostResizeDiagnostics(ImageHandle, &GopSnapshot);
+  PrintLinuxTargetResourcePlan();
+
+  PrintRootBridgeResourceMaps(ImageHandle);
+  PrintGcdMemorySpaceMap();
+  Print(L"\n");
+
+  Status = gBS->LocateHandleBuffer(
+                  ByProtocol,
+                  &gEfiPciIoProtocolGuid,
+                  NULL,
+                  &HandleCount,
+                  &Handles
+                  );
 
   if (EFI_ERROR(Status)) {
-    Print(L"\nBAR1 resize transaction returned: %r\n", Status);
-    return Status;
+    Print(L"LocateHandleBuffer(PciIo) failed: %r\n", Status);
+    goto PostResizeDiagnostics;
   }
 
-  Print(L"\n=== EFI APPLICATION COMPLETE ===\n");
+  Print(L"PCI I/O handles: %u\n\n", HandleCount);
+
+  Records = AllocateZeroPool(sizeof(*Records) * HandleCount);
+  if (Records == NULL) {
+    Print(L"Failed to allocate PCI device records.\n");
+    goto PostResizeDiagnostics;
+  }
+
+  CollectPciRecords(Handles, HandleCount, ImageHandle, Records);
+  PrintTargetCompanionAudit(Records, HandleCount);
+
+  for (Index = 0; Index < HandleCount; Index++) {
+    PciIo = NULL;
+
+    Status = gBS->OpenProtocol(
+                    Handles[Index],
+                    &gEfiPciIoProtocolGuid,
+                    (VOID **)&PciIo,
+                    ImageHandle,
+                    NULL,
+                    EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                    );
+
+    if (EFI_ERROR(Status) || PciIo == NULL) {
+      if (!EFI_ERROR(Status)) {
+        gBS->CloseProtocol(
+               Handles[Index],
+               &gEfiPciIoProtocolGuid,
+               ImageHandle,
+               NULL
+               );
+      }
+      continue;
+    }
+
+    Status = PciIo->GetLocation(
+                      PciIo,
+                      &Segment,
+                      &Bus,
+                      &Device,
+                      &Function
+                      );
+
+    if (EFI_ERROR(Status)) {
+      gBS->CloseProtocol(
+             Handles[Index],
+             &gEfiPciIoProtocolGuid,
+             ImageHandle,
+             NULL
+             );
+      continue;
+    }
+
+    if (EFI_ERROR(ReadConfig32(PciIo, 0x00, &IdReg)) ||
+        EFI_ERROR(ReadConfig32(PciIo, 0x08, &ClassReg)) ||
+        EFI_ERROR(ReadConfig32(PciIo, 0x0C, &HeaderReg))) {
+      gBS->CloseProtocol(
+             Handles[Index],
+             &gEfiPciIoProtocolGuid,
+             ImageHandle,
+             NULL
+             );
+      continue;
+    }
+
+    Vendor = (UINT16)(IdReg & 0xFFFF);
+    DeviceId = (UINT16)(IdReg >> 16);
+    BaseClass = (UINT8)(ClassReg >> 24);
+    SubClass = (UINT8)(ClassReg >> 16);
+    HeaderType = (UINT8)((HeaderReg >> 16) & 0x7F);
+
+    BarCount = (HeaderType == PCI_HEADER_TYPE_ENDPOINT) ? 6 :
+               (HeaderType == PCI_HEADER_TYPE_BRIDGE) ? 2 : 0;
+
+    IsNvidiaDisplay = (Vendor == NVIDIA_VENDOR_ID) &&
+                      (BaseClass == PCI_CLASS_DISPLAY) &&
+                      ((SubClass == 0x00) || (SubClass == 0x02));
+
+    IsRootPort = (Segment == 0 &&
+                  Bus == 0 &&
+                  Device == 1 &&
+                  Function == 0);
+
+    if (Vendor != NVIDIA_VENDOR_ID && !IsRootPort) {
+      gBS->CloseProtocol(
+             Handles[Index],
+             &gEfiPciIoProtocolGuid,
+             ImageHandle,
+             NULL
+             );
+      continue;
+    }
+
+    Print(
+      L"%04x:%02x:%02x.%x  %04x:%04x  class=%02x:%02x  hdr=%02x\n",
+      Segment,
+      Bus,
+      Device,
+      Function,
+      Vendor,
+      DeviceId,
+      BaseClass,
+      SubClass,
+      HeaderType
+      );
+
+    if (Vendor == NVIDIA_VENDOR_ID) {
+      PrintParentBridge(Records, HandleCount, Segment, Bus);
+      PrintBars(PciIo, BarCount);
+      PrintBarResources(PciIo, BarCount);
+      PrintProtocolOwners(Handles[Index], ImageHandle);
+
+      if (IsNvidiaDisplay) {
+        Print(L"    NVIDIA display controller candidate\n");
+
+        /* Raw data first: independent evidence for decoded results. */
+        PrintRawConfigDump(PciIo);
+        PrintExtendedCapabilities(PciIo);
+        PrintNvidiaVsec(PciIo, HeaderType);
+
+        if (Segment == 0 &&
+            Bus == 1 &&
+            Device == 0 &&
+            Function == 0 &&
+            DeviceId == NVIDIA_TARGET_DEVICE_ID) {
+        Print(L"    NVIDIA companion/other function\n");
+      } else {
+        Print(L"    NVIDIA companion/other function\n");
+      }
+    } else if (IsRootPort) {
+      Print(L"    Intel root-port candidate\n");
+
+      if (HeaderType != PCI_HEADER_TYPE_BRIDGE) {
+        Print(L"    WARNING: expected Type 1 bridge header\n");
+      }
+
+      PrintBars(PciIo, BarCount);
+
+      if (HeaderType == PCI_HEADER_TYPE_BRIDGE) {
+        PrintBridgeWindows(PciIo);
+      }
+    }
+
+    Print(L"\n");
+
+    gBS->CloseProtocol(
+           Handles[Index],
+           &gEfiPciIoProtocolGuid,
+           ImageHandle,
+           NULL
+           );
+  }
+
+  Print(L"=== END POST-TRANSACTION SCAN ===\n");
+  Print(L"GetBarAttributes reports firmware resource descriptors; it does not enumerate all free host MMIO space.\n");
+
+PostResizeDiagnostics:
+
+  if (Records != NULL) {
+    FreePool(Records);
+    Records = NULL;
+  }
+
+  if (Handles != NULL) {
+    FreePool(Handles);
+    Handles = NULL;
+  }
+
+  //
+  // Compare the GOP state captured before resizing with its current state.
+  // This also runs after a failed or rolled-back transaction.
+  //
+  RunNvidiaGopPostResizeDiagnostics(ImageHandle, &GopSnapshot);
+
+  if (EFI_ERROR(TransactionStatus)) {
+    Print(L"\nBAR1 resize transaction returned: %r\n", TransactionStatus);
+    return TransactionStatus;
+  }
 
   return EFI_SUCCESS;
 }
