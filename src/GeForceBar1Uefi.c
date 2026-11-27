@@ -1894,6 +1894,7 @@ PrintRootBridgeResourceMaps (
                   &RootCount,
                   &RootHandles
                   );
+
   if (EFI_ERROR(Status)) {
     Print(L"Root bridge protocol enumeration failed: %r\n", Status);
     return;
@@ -1906,6 +1907,7 @@ PrintRootBridgeResourceMaps (
     Resources = NULL;
     HostAlloc = NULL;
     ParentHandle = NULL;
+
     TargetCoveredByRootAperture = FALSE;
     HostAllocAttributesValid = FALSE;
     HostMem64Decode = FALSE;
@@ -1918,12 +1920,14 @@ PrintRootBridgeResourceMaps (
                     NULL,
                     EFI_OPEN_PROTOCOL_GET_PROTOCOL
                     );
+
     if (EFI_ERROR(Status) || RootIo == NULL) {
       Print(L"  root[%u]: open failed: %r\n", Index, Status);
       continue;
     }
 
     ParentHandle = RootIo->ParentHandle;
+
     Print(
       L"  root[%u]: handle=%p segment=%04x parent-host-bridge=%p\n",
       Index,
@@ -1932,108 +1936,155 @@ PrintRootBridgeResourceMaps (
       ParentHandle
       );
 
-    Status = RootIo->Configuration(RootIo, &Resources);
-    if (EFI_ERROR(Status)) {
-      Print(L"    Configuration(): %r\n", Status);
-    } else if (Resources == NULL) {
-      Print(L"    Configuration(): success, NULL descriptor list\n");
+    if (RootIo->Configuration == NULL) {
+      Print(L"    Configuration(): method unavailable\n");
     } else {
-      Descriptor = (EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR *)Resources;
-      SawDescriptor = FALSE;
+      Status = RootIo->Configuration(RootIo, &Resources);
 
-      for (DescriptorIndex = 0; DescriptorIndex < 64; DescriptorIndex++) {
-        if (Descriptor->Desc == ACPI_END_TAG_DESCRIPTOR) {
-          break;
-        }
-        if (Descriptor->Desc != ACPI_ADDRESS_SPACE_DESCRIPTOR) {
+      if (EFI_ERROR(Status)) {
+        Print(L"    Configuration(): %r\n", Status);
+
+      } else if (Resources == NULL) {
+        Print(L"    Configuration(): success, NULL descriptor list\n");
+
+      } else {
+        Descriptor = (EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR *)Resources;
+        SawDescriptor = FALSE;
+
+        for (DescriptorIndex = 0;
+             DescriptorIndex < 64;
+             DescriptorIndex++) {
+
+          if (Descriptor->Desc == ACPI_END_TAG_DESCRIPTOR) {
+            break;
+          }
+
+          if (Descriptor->Desc != ACPI_ADDRESS_SPACE_DESCRIPTOR) {
+            Print(
+              L"    unexpected resource descriptor type=%02x; stopping\n",
+              Descriptor->Desc
+              );
+            break;
+          }
+
+          SawDescriptor = TRUE;
+
           Print(
-            L"    unexpected resource descriptor type=%02x; stopping\n",
-            Descriptor->Desc
+            L"    aperture[%u]: type=%u granularity=%u flags=%02x "
+            L"min=%016Lx max=%016Lx length=%016Lx translation=%016Lx\n",
+            DescriptorIndex,
+            Descriptor->ResType,
+            Descriptor->AddrSpaceGranularity,
+            Descriptor->SpecificFlag,
+            Descriptor->AddrRangeMin,
+            Descriptor->AddrRangeMax,
+            Descriptor->AddrLen,
+            Descriptor->AddrTranslationOffset
             );
-          break;
+
+          /*
+           * Require one identity-mapped memory aperture to cover the
+           * entire BAR3 + BAR1 target window.
+           *
+           * This checks firmware-reported resources only. It does not
+           * prove that the root complex forwards transactions there.
+           */
+          if ((Descriptor->ResType == ACPI_ADDRESS_SPACE_TYPE_MEM) &&
+              (Descriptor->AddrRangeMin <= PREF_WINDOW_TARGET_BASE) &&
+              (Descriptor->AddrRangeMax >=
+                 (PREF_WINDOW_TARGET_BASE +
+                  PREF_WINDOW_TARGET_BYTES - 1)) &&
+              (Descriptor->AddrTranslationOffset == 0)) {
+
+            TargetCoveredByRootAperture = TRUE;
+          }
+
+          Descriptor++;
         }
 
-        SawDescriptor = TRUE;
-        Print(
-          L"    aperture[%u]: type=%u granularity=%u flags=%02x min=%016Lx max=%016Lx length=%016Lx translation=%016Lx\n",
-          DescriptorIndex,
-          Descriptor->ResType,
-          Descriptor->AddrSpaceGranularity,
-          Descriptor->SpecificFlag,
-          Descriptor->AddrRangeMin,
-          Descriptor->AddrRangeMax,
-          Descriptor->AddrLen,
-          Descriptor->AddrTranslationOffset
-          );
-        /*
-         * Require one root-bridge memory aperture to cover the complete
-         * BAR3 + BAR1 window. A nonzero translation offset is treated as
-         * inconclusive here rather than silently assuming identity mapping.
-         */
-        if ((Descriptor->ResType == ACPI_ADDRESS_SPACE_TYPE_MEM) &&
-            (Descriptor->AddrRangeMin <= PREF_WINDOW_TARGET_BASE) &&
-            (Descriptor->AddrRangeMax >=
-               (PREF_WINDOW_TARGET_BASE +
-                PREF_WINDOW_TARGET_BYTES - 1)) &&
-            (Descriptor->AddrTranslationOffset == 0)) {
-          TargetCoveredByRootAperture = TRUE;
-          
+        if (!SawDescriptor) {
+          Print(L"    no address-space descriptors returned\n");
         }
-        Descriptor++;
-      }
 
-      if (!SawDescriptor) {
-        Print(L"    no address-space descriptors returned\n");
+        if (DescriptorIndex == 64) {
+          Print(L"    descriptor display limit reached\n");
+        }
+
+        /* Configuration() owns this buffer; do not FreePool(). */
       }
-      if (DescriptorIndex == 64) {
-        Print(L"    descriptor display limit reached\n");
-      }
-      /* Per UEFI, Configuration() owns this buffer; do not FreePool(). */
     }
+
     Print(
       L"    Full target inside identity-mapped root memory aperture: %s\n",
       TargetCoveredByRootAperture ? L"YES" : L"NO"
       );
 
+    /*
+     * Query the parent host bridge's allocation attributes.
+     */
     if (ParentHandle != NULL) {
       Status = gBS->HandleProtocol(
                       ParentHandle,
                       &gEfiPciHostBridgeResourceAllocationProtocolGuid,
                       (VOID **)&HostAlloc
                       );
+
       if (EFI_ERROR(Status) || HostAlloc == NULL) {
-        Print(L"    host-bridge resource-allocation protocol: not exposed (%r)\n", Status);
-      } else {
-        AllocationAttributes = 0;
-        Status = HostAlloc->GetAllocAttributes(
-                              HostAlloc,
-                              RootHandles[Index],
-                              &AllocationAttributes
-                              );
-        if (EFI_ERROR(Status)) {
-          Print(L"    GetAllocAttributes(): %r\n", Status);
-        } else {
-          HostAllocAttributesValid = TRUE;
-          HostMem64Decode =
-            ((AllocationAttributes & EFI_PCI_HOST_BRIDGE_MEM64_DECODE) != 0);
-          Print(
-            L"    host-bridge allocation attributes: %016Lx\n",
-            AllocationAttributes
-            );
-          Print(
-            L"      combine MEM/PMEM windows: %s\n",
-            (AllocationAttributes & EFI_PCI_HOST_BRIDGE_COMBINE_MEM_PMEM) != 0 ? L"yes" : L"no"
-            );
-          Print(
-            L"      64-bit memory decode:     %s\n",
-            (AllocationAttributes & EFI_PCI_HOST_BRIDGE_MEM64_DECODE) != 0 ? L"yes" : L"no"
-            );
-        }
         Print(
-          L"    host-bridge method availability: NotifyPhase=%s GetNextRootBridge=%s "
-          L"GetAllocAttributes=%s StartBusEnumeration=%s SetBusNumbers=%s "
-          L"SubmitResources=%s GetProposedResources=%s PreprocessController=%s\n",
-        
+          L"    host-bridge resource-allocation protocol: "
+          L"not exposed (%r)\n",
+          Status
+          );
+
+      } else {
+        if (HostAlloc->GetAllocAttributes == NULL) {
+          Print(L"    GetAllocAttributes(): method unavailable\n");
+
+        } else {
+          AllocationAttributes = 0;
+
+          Status = HostAlloc->GetAllocAttributes(
+                                HostAlloc,
+                                RootHandles[Index],
+                                &AllocationAttributes
+                                );
+
+          if (EFI_ERROR(Status)) {
+            Print(L"    GetAllocAttributes(): %r\n", Status);
+
+          } else {
+            HostAllocAttributesValid = TRUE;
+
+            HostMem64Decode =
+              ((AllocationAttributes &
+                EFI_PCI_HOST_BRIDGE_MEM64_DECODE) != 0);
+
+            Print(
+              L"    host-bridge allocation attributes: %016Lx\n",
+              AllocationAttributes
+              );
+
+            Print(
+              L"      combine MEM/PMEM windows: %s\n",
+              (AllocationAttributes &
+               EFI_PCI_HOST_BRIDGE_COMBINE_MEM_PMEM) != 0 ?
+                L"yes" : L"no"
+              );
+
+            Print(
+              L"      64-bit memory decode:     %s\n",
+              HostMem64Decode ? L"yes" : L"no"
+              );
+          }
+        }
+
+        Print(
+          L"    host-bridge method availability: "
+          L"NotifyPhase=%s GetNextRootBridge=%s "
+          L"GetAllocAttributes=%s StartBusEnumeration=%s "
+          L"SetBusNumbers=%s SubmitResources=%s "
+          L"GetProposedResources=%s PreprocessController=%s\n",
+
           HostAlloc->NotifyPhase != NULL ? L"yes" : L"no",
           HostAlloc->GetNextRootBridge != NULL ? L"yes" : L"no",
           HostAlloc->GetAllocAttributes != NULL ? L"yes" : L"no",
@@ -2043,17 +2094,74 @@ PrintRootBridgeResourceMaps (
           HostAlloc->GetProposedResources != NULL ? L"yes" : L"no",
           HostAlloc->PreprocessController != NULL ? L"yes" : L"no"
           );
-        
-        Print(L"    No host-bridge phase or allocation method was invoked.\n");
-        
-        Print(L"    SubmitResources/NotifyPhase/SetResources are enumeration-phase "
-              L"operations, not a safe late-resize API.\n");
-        
-        Print(L"    Protocol presence does not prove late reallocation is legal.\n");
+
+        Print(
+          L"    No host-bridge phase or allocation method was invoked.\n"
+          );
+
+        Print(
+          L"    SubmitResources/NotifyPhase/SetResources are "
+          L"enumeration-phase operations, not a safe late-resize API.\n"
+          );
+
+        Print(
+          L"    Protocol presence does not prove late reallocation is legal.\n"
+          );
       }
+
     } else {
       Print(L"    host-bridge parent handle unavailable\n");
     }
+
+    /*
+     * Final verdict for this root bridge.
+     */
+    Print(L"\n    === TARGET FORWARDING PREFLIGHT ===\n");
+
+    if (!TargetCoveredByRootAperture) {
+      Print(
+        L"    NO-GO: firmware's root-bridge memory aperture does not\n"
+        );
+
+      Print(
+        L"           identity-map the complete target range:\n"
+        );
+
+      Print(
+        L"           %016Lx - %016Lx\n",
+        PREF_WINDOW_TARGET_BASE,
+        PREF_WINDOW_TARGET_BASE + PREF_WINDOW_TARGET_BYTES - 1
+        );
+
+      Print(
+        L"           A GCD reservation and downstream bridge-window\n"
+        L"           programming cannot expand the root-complex aperture.\n"
+        );
+
+    } else if (!HostAllocAttributesValid) {
+      Print(
+        L"    INCONCLUSIVE: root aperture covers the target, but\n"
+        L"                  host-bridge allocation attributes are unavailable.\n"
+        );
+
+    } else if (!HostMem64Decode) {
+      Print(
+        L"    NO-GO: host bridge does not advertise 64-bit memory decode.\n"
+        );
+
+    } else {
+      Print(
+        L"    REPORTED-RESOURCE PASS: root aperture covers the target\n"
+        L"                           and host bridge advertises 64-bit decode.\n"
+        );
+
+      Print(
+        L"    IMPORTANT: this does NOT prove live MMIO forwarding.\n"
+        L"    No target BAR-space read or write was attempted.\n"
+        );
+    }
+
+    Print(L"    No host-bridge allocation phase was invoked.\n");
 
     gBS->CloseProtocol(
            RootHandles[Index],
@@ -2068,7 +2176,11 @@ PrintRootBridgeResourceMaps (
   }
 
   Print(L"=== END ROOT-BRIDGE RESOURCE MAPS ===\n");
-  Print(L"NOTE: these are firmware-reported current apertures, not a free-MMIO map.\n");
+
+  Print(
+    L"NOTE: these are firmware-reported current apertures, "
+    L"not a free-MMIO map.\n"
+    );
 }
 
 /**
