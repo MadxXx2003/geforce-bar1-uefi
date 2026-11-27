@@ -1,4 +1,4 @@
-
+// SPDX-License-Identifier: MIT
 #include <Uefi.h>
 #include <Protocol/PciIo.h>
 #include <Protocol/GraphicsOutput.h>
