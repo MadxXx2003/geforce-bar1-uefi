@@ -2700,10 +2700,10 @@ PostResizeDiagnostics:
   // Compare the GOP state captured before resizing with its current state.
   // This also runs after a failed or rolled-back transaction.
   //
-RunNvidiaGopPostResizeDiagnostics(ImageHandle, &GopSnapshot);
-
-#if ENABLE_NVIDIA_GOP_DRIVER_RECONNECT
-
+  RunNvidiaGopPostResizeDiagnostics(ImageHandle, &GopSnapshot);
+  
+  #if ENABLE_NVIDIA_GOP_DRIVER_RECONNECT
+  
   //
   // Experimental phase: only run after a successful BAR1 transaction.
   // This is deliberately separate from the resize transaction.
@@ -2741,13 +2741,13 @@ RunNvidiaGopPostResizeDiagnostics(ImageHandle, &GopSnapshot);
             CaptureStatus);
     }
   }
-
-#endif
-
-if (EFI_ERROR(TransactionStatus)) {
-  Print(L"\nBAR1 resize transaction returned: %r\n",
-        TransactionStatus);
-  return TransactionStatus;
-}
-
-return EFI_SUCCESS;
+  
+  #endif
+  
+  if (EFI_ERROR(TransactionStatus)) {
+    Print(L"\nBAR1 resize transaction returned: %r\n",
+          TransactionStatus);
+    return TransactionStatus;
+  }
+  
+  return EFI_SUCCESS;
